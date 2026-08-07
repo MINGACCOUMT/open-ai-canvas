@@ -120,6 +120,87 @@ func normalizeXAIVideoResolution(value string) string {
 	}
 }
 
+// normalizeXAIImageAspectRatio 把画布 size（比例或像素）映射为 xAI 官方 aspect_ratio。
+// 官方支持 1:1/16:9/9:16/4:3/3:4/3:2/2:3/2:1/1:2/19.5:9/9:19.5/20:9/9:20/auto。
+// 空或 auto 不传字段，让上游自行选择。
+func normalizeXAIImageAspectRatio(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" || value == "auto" {
+		return ""
+	}
+	allowed := map[string]bool{
+		"1:1": true, "16:9": true, "9:16": true, "4:3": true, "3:4": true,
+		"3:2": true, "2:3": true, "2:1": true, "1:2": true,
+		"19.5:9": true, "9:19.5": true, "20:9": true, "9:20": true, "21:9": true,
+	}
+	if allowed[value] {
+		// xAI 不列 21:9，最接近超宽官方值用 20:9。
+		if value == "21:9" {
+			return "20:9"
+		}
+		return value
+	}
+	parts := strings.Split(value, "x")
+	if len(parts) != 2 {
+		return ""
+	}
+	width, widthErr := strconv.Atoi(strings.TrimSpace(parts[0]))
+	height, heightErr := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
+		return ""
+	}
+	return nearestXAIImageAspectRatio(float64(width) / float64(height))
+}
+
+func nearestXAIImageAspectRatio(ratio float64) string {
+	candidates := []struct {
+		name  string
+		ratio float64
+	}{
+		{name: "1:1", ratio: 1},
+		{name: "16:9", ratio: 16.0 / 9},
+		{name: "9:16", ratio: 9.0 / 16},
+		{name: "4:3", ratio: 4.0 / 3},
+		{name: "3:4", ratio: 3.0 / 4},
+		{name: "3:2", ratio: 3.0 / 2},
+		{name: "2:3", ratio: 2.0 / 3},
+		{name: "2:1", ratio: 2},
+		{name: "1:2", ratio: 0.5},
+		{name: "20:9", ratio: 20.0 / 9},
+		{name: "9:20", ratio: 9.0 / 20},
+		{name: "19.5:9", ratio: 19.5 / 9},
+		{name: "9:19.5", ratio: 9.0 / 19.5},
+	}
+	bestName := "1:1"
+	bestDifference := 2.0
+	for _, candidate := range candidates {
+		difference := ratio - candidate.ratio
+		if difference < 0 {
+			difference = -difference
+		}
+		if difference < bestDifference {
+			bestName = candidate.name
+			bestDifference = difference
+		}
+	}
+	return bestName
+}
+
+// normalizeXAIImageResolution 把画布 quality 映射为 xAI 官方 resolution（1k/2k）。
+// 空值不传；1k/low/standard → 1k；2k/medium/hd/high/4k → 2k。
+func normalizeXAIImageResolution(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return ""
+	case "1k", "low", "standard":
+		return "1k"
+	case "2k", "medium", "hd", "high", "4k":
+		return "2k"
+	default:
+		return ""
+	}
+}
+
 func normalizeXAIVideoAspectRatio(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	allowed := map[string]bool{

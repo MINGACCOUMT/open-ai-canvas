@@ -193,6 +193,74 @@ function resolveRequestSize(quality: string | undefined, size: string) {
     throw new Error("图像尺寸格式不支持，请使用 auto、9:16 或 1024x1024");
 }
 
+// xAI 官方图片用 aspect_ratio + resolution，不用 OpenAI 的 size=WxH。
+const XAI_IMAGE_ASPECT_RATIOS = new Set([
+    "1:1",
+    "16:9",
+    "9:16",
+    "4:3",
+    "3:4",
+    "3:2",
+    "2:3",
+    "2:1",
+    "1:2",
+    "19.5:9",
+    "9:19.5",
+    "20:9",
+    "9:20",
+]);
+
+function nearestXAIImageAspectRatio(width: number, height: number) {
+    const ratio = width / height;
+    const candidates = [
+        { name: "1:1", ratio: 1 },
+        { name: "16:9", ratio: 16 / 9 },
+        { name: "9:16", ratio: 9 / 16 },
+        { name: "4:3", ratio: 4 / 3 },
+        { name: "3:4", ratio: 3 / 4 },
+        { name: "3:2", ratio: 3 / 2 },
+        { name: "2:3", ratio: 2 / 3 },
+        { name: "2:1", ratio: 2 },
+        { name: "1:2", ratio: 0.5 },
+        { name: "20:9", ratio: 20 / 9 },
+        { name: "9:20", ratio: 9 / 20 },
+        { name: "19.5:9", ratio: 19.5 / 9 },
+        { name: "9:19.5", ratio: 9 / 19.5 },
+    ];
+    let bestName = "1:1";
+    let bestDifference = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+        const difference = Math.abs(ratio - candidate.ratio);
+        if (difference < bestDifference) {
+            bestName = candidate.name;
+            bestDifference = difference;
+        }
+    }
+    return bestName;
+}
+
+function resolveXAIImageAspectRatio(size: string) {
+    const value = size.trim().toLowerCase();
+    if (!value || value === "auto") return undefined;
+    if (value === "21:9") return "20:9";
+    if (XAI_IMAGE_ASPECT_RATIOS.has(value)) return value;
+    const dimensions = parseImageDimensions(value);
+    if (dimensions) return nearestXAIImageAspectRatio(dimensions.width, dimensions.height);
+    if (value.includes(":")) {
+        const parsed = parseImageRatio(value);
+        return nearestXAIImageAspectRatio(parsed.width, parsed.height);
+    }
+    return undefined;
+}
+
+function resolveXAIImageResolution(quality: string | undefined) {
+    const value = (quality || "").trim().toLowerCase();
+    if (!value || value === "auto") return undefined;
+    if (value === "1k" || value === "low" || value === "standard") return "1k";
+    if (value === "2k" || value === "medium" || value === "hd" || value === "high" || value === "4k") return "2k";
+    return undefined;
+}
+
 function normalizeVolcengineArkImageSize(size: string | undefined) {
     if (!size) return undefined;
     const dimensions = parseImageDimensions(size);
@@ -799,9 +867,11 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const isVolcengineArk = requestConfig.interfaceType === "volcengine-ark-image";
-    // xAI 官方图片协议：只发 model/prompt/n/size/response_format，不带 output_format/quality 等 xAI 不认字段（会 422）。
+    // xAI 官方图片协议：发 aspect_ratio/resolution，不发 size/output_format/quality（size 是 OpenAI 语义，xAI 不认会忽略比例）。
     const isXaiImage = requestConfig.interfaceType === "xai-image";
     const normalizedRequestSize = isVolcengineArk ? normalizeVolcengineArkImageSize(requestSize) : requestSize;
+    const xaiAspectRatio = isXaiImage ? resolveXAIImageAspectRatio(config.size || "") : undefined;
+    const xaiResolution = isXaiImage ? resolveXAIImageResolution(config.quality || quality) : undefined;
     try {
         const payload = isVolcengineArk
             ? {
@@ -816,7 +886,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                     prompt: withSystemPrompt(requestConfig, prompt),
                     n,
                     response_format: "b64_json",
-                    ...(requestSize ? { size: requestSize } : {}),
+                    ...(xaiAspectRatio ? { aspect_ratio: xaiAspectRatio } : {}),
+                    ...(xaiResolution ? { resolution: xaiResolution } : {}),
                 }
               : {
                     model: requestConfig.model,
@@ -889,7 +960,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         if (mask) throw new Error("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试");
         if (references.length === 0) throw new Error("xAI 图片编辑至少需要一张参考图");
         if (references.length > 3) throw new Error("xAI 图片编辑最多支持 3 张参考图");
-        const requestSize = resolveRequestSize(normalizeQuality(config.quality), config.size);
+        const xaiAspectRatio = resolveXAIImageAspectRatio(config.size || "");
+        const xaiResolution = resolveXAIImageResolution(config.quality || normalizeQuality(config.quality));
         try {
             const urls = await Promise.all(references.map((image) => imageToDataUrl(image)));
             const imageObjects = urls.map((url) => ({ url, type: "image_url" as const }));
@@ -898,7 +970,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 prompt: withSystemPrompt(requestConfig, requestPrompt),
                 n,
                 response_format: "b64_json",
-                ...(requestSize ? { size: requestSize } : {}),
+                ...(xaiAspectRatio ? { aspect_ratio: xaiAspectRatio } : {}),
+                ...(xaiResolution ? { resolution: xaiResolution } : {}),
                 ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
             };
             const response = await postChannelJSON<ImageApiResponse>(requestConfig, aiApiUrl(requestConfig, "/images/edits"), payload, options);

@@ -107,7 +107,7 @@ func TestVolcengineArkImageRejectsMaskBeforeRequest(t *testing.T) {
 func TestXAIImageBodyUsesOfficialImageShapeAndOmitsLegacyFields(t *testing.T) {
 	body, err := xaiImageBody(canvasGenerationInput{
 		Prompt: "render as pencil sketch",
-		Config: providerConfig{Model: "grok-imagine-image-quality", Size: "1024x1024", SystemPrompt: "stay on topic"},
+		Config: providerConfig{Model: "grok-imagine-image-quality", Size: "16:9", Quality: "2k", SystemPrompt: "stay on topic"},
 		ReferenceImages: []providerMedia{
 			{ID: "image-1", DataURL: testReferenceImageDataURL},
 		},
@@ -121,14 +121,17 @@ func TestXAIImageBodyUsesOfficialImageShapeAndOmitsLegacyFields(t *testing.T) {
 	if body["response_format"] != "b64_json" {
 		t.Fatalf("response_format = %#v", body["response_format"])
 	}
-	if body["size"] != "1024x1024" {
-		t.Fatalf("size = %#v", body["size"])
+	if body["aspect_ratio"] != "16:9" {
+		t.Fatalf("aspect_ratio = %#v", body["aspect_ratio"])
+	}
+	if body["resolution"] != "2k" {
+		t.Fatalf("resolution = %#v", body["resolution"])
 	}
 	image, ok := body["image"].(map[string]string)
 	if !ok || image["url"] != testReferenceImageDataURL || image["type"] != "image_url" {
 		t.Fatalf("image = %#v", body["image"])
 	}
-	for _, legacyField := range []string{"output_format", "quality", "background", "images"} {
+	for _, legacyField := range []string{"output_format", "quality", "background", "images", "size"} {
 		if _, exists := body[legacyField]; exists {
 			t.Fatalf("body includes legacy field %q: %#v", legacyField, body)
 		}
@@ -180,27 +183,31 @@ func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
 	}))
 	defer server.Close()
 
-	result, err := runImageTask(context.Background(), canvasGenerationInput{
-		Prompt: "a gray circle",
-		Config: providerConfig{
-			BaseURL:       server.URL,
-			APIKey:        "test-key",
-			Model:         "grok-imagine-image-quality",
-			InterfaceType: "xai-image",
-			Size:          "1024x1024",
-		},
-	})
-	if err != nil {
-		t.Fatalf("runImageTask() error = %v", err)
-	}
-	if gotBody["model"] != "grok-imagine-image-quality" || gotBody["response_format"] != "b64_json" {
-		t.Fatalf("request body = %#v", gotBody)
-	}
-	for _, legacyField := range []string{"output_format", "quality", "background"} {
-		if _, exists := gotBody[legacyField]; exists {
-			t.Fatalf("request body includes legacy field %q: %#v", legacyField, gotBody)
+		result, err := runImageTask(context.Background(), canvasGenerationInput{
+			Prompt: "a gray circle",
+			Config: providerConfig{
+				BaseURL:       server.URL,
+				APIKey:        "test-key",
+				Model:         "grok-imagine-image-quality",
+				InterfaceType: "xai-image",
+				Size:          "9:16",
+				Quality:       "high",
+			},
+		})
+		if err != nil {
+			t.Fatalf("runImageTask() error = %v", err)
 		}
-	}
+		if gotBody["model"] != "grok-imagine-image-quality" || gotBody["response_format"] != "b64_json" {
+			t.Fatalf("request body = %#v", gotBody)
+		}
+		if gotBody["aspect_ratio"] != "9:16" || gotBody["resolution"] != "2k" {
+			t.Fatalf("xAI image settings = %#v", gotBody)
+		}
+		for _, legacyField := range []string{"output_format", "quality", "background", "size"} {
+			if _, exists := gotBody[legacyField]; exists {
+				t.Fatalf("request body includes legacy field %q: %#v", legacyField, gotBody)
+			}
+		}
 	images, ok := result["images"].([]map[string]string)
 	if !ok || len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("images = %#v", result["images"])

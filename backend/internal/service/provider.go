@@ -550,9 +550,9 @@ func volcengineArkImageBody(input canvasGenerationInput) (map[string]interface{}
 	return body, nil
 }
 
-// runXAIImageTask 对接 xAI 官方图片协议：只发 model/prompt/n/response_format/size 和参考图，
-// 不带 output_format/quality/background 等 xAI 不认字段（会触发 422）。参考图走 image:{url,type}
-// 单图首帧或 images:[{url,type}] 多图编辑（≤3），不支持蒙版。
+// runXAIImageTask 对接 xAI 官方图片协议：只发 model/prompt/n/response_format/aspect_ratio/resolution 和参考图，
+// 不带 size/output_format/quality/background 等字段（size 是 OpenAI 语义，xAI 用 aspect_ratio+resolution 控比例）。
+// 参考图走 image:{url,type} 单图首帧或 images:[{url,type}] 多图编辑（≤3），不支持蒙版。
 func runXAIImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
 	if input.Mask != nil {
 		return nil, errors.New("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试")
@@ -579,8 +579,12 @@ func xaiImageBody(input canvasGenerationInput) (map[string]interface{}, error) {
 		"n":               1,
 		"response_format": "b64_json",
 	}
-	if size := normalizePixelSize(input.Config.Size); size != "" {
-		body["size"] = size
+	// xAI 官方用 aspect_ratio + resolution，不用 OpenAI 的 size=WxH。
+	if aspectRatio := normalizeXAIImageAspectRatio(input.Config.Size); aspectRatio != "" {
+		body["aspect_ratio"] = aspectRatio
+	}
+	if resolution := normalizeXAIImageResolution(input.Config.Quality); resolution != "" {
+		body["resolution"] = resolution
 	}
 	if len(input.ReferenceImages) == 0 {
 		return body, nil
