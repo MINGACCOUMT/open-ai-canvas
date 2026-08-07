@@ -29,4 +29,5 @@ dist/
 .serena/
 .spec-workflow/
 .vscode/
+.zcode/
 camera_language_guide.md

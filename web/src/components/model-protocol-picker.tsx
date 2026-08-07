@@ -16,7 +16,7 @@ const capabilityChoices: Array<{
     brands: string[];
 }> = [
     { value: "text", label: "文本", description: "对话与推理", icon: <MessageSquareText className="size-4" />, brands: ["openai", "deepseek", "glm"] },
-    { value: "image", label: "图片", description: "生成与编辑", icon: <Image className="size-4" />, brands: ["openai", "gemini"] },
+    { value: "image", label: "图片", description: "生成与编辑", icon: <Image className="size-4" />, brands: ["openai", "grok", "gemini"] },
     { value: "video", label: "视频", description: "生成与续写", icon: <Film className="size-4" />, brands: ["grok", "gemini"] },
     { value: "audio", label: "音频", description: "语音与音效", icon: <AudioLines className="size-4" />, brands: ["openai"] },
 ];
@@ -146,7 +146,7 @@ function ProtocolBrandMark({ protocol, compact = false }: { protocol: ModelProto
     if (protocol.value.startsWith("volcengine-jimeng-")) return <span className={cn("grid shrink-0 place-items-center rounded-md bg-muted text-foreground/65", iconSize)}><Sparkles className={compact ? "size-3" : "size-4"} /></span>;
     if (protocol.value.startsWith("volcengine-")) return <span className={cn("grid shrink-0 place-items-center rounded-md bg-muted text-foreground/65", iconSize)}><Flame className={compact ? "size-3" : "size-4"} /></span>;
     if (protocol.value.startsWith("newapi-channel-")) return <span className={cn("grid shrink-0 place-items-center rounded-md bg-muted text-foreground/65", iconSize)}><Network className={compact ? "size-3" : "size-4"} /></span>;
-    const brand = protocol.value === "gemini-veo" ? "gemini" : protocol.value === "xai-video" ? "grok" : "openai";
+    const brand = protocol.value === "gemini-veo" ? "gemini" : protocol.value === "xai-video" || protocol.value === "xai-image" ? "grok" : "openai";
     return <BrandIconRow models={[brand]} compact={compact} />;
 }
 

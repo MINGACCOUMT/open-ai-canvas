@@ -185,6 +185,8 @@ func interfaceAllowsProxyPath(interfaceType model.ChannelInterfaceType, requestP
 		return requestPath == "/responses"
 	case model.ChannelInterfaceOpenAIImage:
 		return requestPath == "/images/generations" || requestPath == "/images/edits"
+	case model.ChannelInterfaceXAIImage:
+		return requestPath == "/images/generations" || requestPath == "/images/edits"
 	case model.ChannelInterfaceVolcengineArkImage:
 		return requestPath == "/images/generations"
 	case model.ChannelInterfaceOpenAIAudio:
