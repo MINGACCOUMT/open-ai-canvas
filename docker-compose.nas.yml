@@ -1,20 +1,24 @@
-# NAS 轻量部署：阿里云镜像 + SQLite（无需 postgres/redis，适合个人使用）。
+# NAS 轻量部署：阿里云 ACR 镜像 + SQLite（无需 postgres/redis，适合个人使用）。
+#
+# 镜像 tag 规则与 ACR 实际产出一致：backend-vX.Y.Z / web-vX.Y.Z。
 #
 # 用法（在 NAS 上）：
 #   1. 把本文件拷到 NAS 的某个目录，例如 /share/Container/open-ai-canvas/
 #   2. 在同目录建 .env 文件填好镜像地址（见下方变量说明）
-#   3. docker compose -f docker-compose.nas.yml up -d
+#   3. 若仓库私有，先 docker login registry.cn-hangzhou.aliyuncs.com
+#   4. docker compose -f docker-compose.nas.yml up -d
 #
-# .env 文件示例（只需填这 3 行）：
+# .env 文件示例（只需填这几行）：
 #   ALIYUN_REGISTRY=registry.cn-hangzhou.aliyuncs.com
-#   ALIYUN_NAMESPACE=your-namespace
-#   CANVAS_IMAGE_TAG=latest
+#   ALIYUN_NAMESPACE=koramkoin
+#   CANVAS_VERSION=v1.0.44
+#   CANVAS_HTTP_PORT=3000
 #
 # 数据持久化：SQLite 文件存在 ./data 目录，删容器不丢数据。
 
 services:
   backend:
-    image: ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/open-ai-canvas-backend:${CANVAS_IMAGE_TAG:-latest}
+    image: ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/open-ai-canvas:backend-${CANVAS_VERSION}
     environment:
       CANVAS_BACKEND_ADDR: ":8080"
       CANVAS_BACKEND_DATA_DIR: /data
@@ -32,7 +36,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/open-ai-canvas-web:${CANVAS_IMAGE_TAG:-latest}
+    image: ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/open-ai-canvas:web-${CANVAS_VERSION}
     ports:
       - "${CANVAS_HTTP_PORT:-3000}:3000"
     depends_on:
