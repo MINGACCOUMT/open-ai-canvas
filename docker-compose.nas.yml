@@ -19,6 +19,9 @@
 services:
   backend:
     image: ${ALIYUN_REGISTRY}/${ALIYUN_NAMESPACE}/open-ai-canvas:backend-${CANVAS_VERSION}
+    # NAS 上挂载的 ./data 宿主属 root，容器内 app 用户无写权限会报
+    # "unable to open database file"。个人 NAS 直接以 root 运行绕过权限问题。
+    user: root
     environment:
       CANVAS_BACKEND_ADDR: ":8080"
       CANVAS_BACKEND_DATA_DIR: /data
