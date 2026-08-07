@@ -799,6 +799,8 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
     const quality = normalizeQuality(config.quality);
     const requestSize = resolveRequestSize(quality, config.size);
     const isVolcengineArk = requestConfig.interfaceType === "volcengine-ark-image";
+    // xAI 官方图片协议：只发 model/prompt/n/size/response_format，不带 output_format/quality 等 xAI 不认字段（会 422）。
+    const isXaiImage = requestConfig.interfaceType === "xai-image";
     const normalizedRequestSize = isVolcengineArk ? normalizeVolcengineArkImageSize(requestSize) : requestSize;
     try {
         const payload = isVolcengineArk
@@ -808,16 +810,24 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
                   n,
                   ...(normalizedRequestSize ? { size: normalizedRequestSize } : {}),
               }
-            : {
-                  model: requestConfig.model,
-                  prompt: withSystemPrompt(requestConfig, prompt),
-                  n,
-                  ...(quality ? { quality } : {}),
-                  ...(requestSize ? { size: requestSize } : {}),
-                  response_format: "b64_json",
-                  output_format: IMAGE_OUTPUT_FORMAT,
-                  ...(config.transparentBackground === "true" ? { background: "transparent" } : {}),
-              };
+            : isXaiImage
+              ? {
+                    model: requestConfig.model,
+                    prompt: withSystemPrompt(requestConfig, prompt),
+                    n,
+                    response_format: "b64_json",
+                    ...(requestSize ? { size: requestSize } : {}),
+                }
+              : {
+                    model: requestConfig.model,
+                    prompt: withSystemPrompt(requestConfig, prompt),
+                    n,
+                    ...(quality ? { quality } : {}),
+                    ...(requestSize ? { size: requestSize } : {}),
+                    response_format: "b64_json",
+                    output_format: IMAGE_OUTPUT_FORMAT,
+                    ...(config.transparentBackground === "true" ? { background: "transparent" } : {}),
+                };
         const responseData = isVolcengineArk
             ? await postVolcengineArkImage(requestConfig, payload, options)
             : await postChannelJSON<ImageApiResponse>(requestConfig, aiApiUrl(requestConfig, "/images/generations"), payload, options);
@@ -872,6 +882,29 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             return parseImagePayload(response);
         } catch (error) {
             throw new Error(readAxiosError(error, "火山方舟图片生成失败"));
+        }
+    }
+    if (requestConfig.interfaceType === "xai-image") {
+        // xAI 官方图片协议：参考图走 image:{url,type}（单图首帧）或 images:[{url,type}]（多图编辑，最多 3 张）；不支持蒙版，且禁止回退纯文生图。
+        if (mask) throw new Error("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试");
+        if (references.length === 0) throw new Error("xAI 图片编辑至少需要一张参考图");
+        if (references.length > 3) throw new Error("xAI 图片编辑最多支持 3 张参考图");
+        const requestSize = resolveRequestSize(normalizeQuality(config.quality), config.size);
+        try {
+            const urls = await Promise.all(references.map((image) => imageToDataUrl(image)));
+            const imageObjects = urls.map((url) => ({ url, type: "image_url" as const }));
+            const payload = {
+                model: requestConfig.model,
+                prompt: withSystemPrompt(requestConfig, requestPrompt),
+                n,
+                response_format: "b64_json",
+                ...(requestSize ? { size: requestSize } : {}),
+                ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
+            };
+            const response = await postChannelJSON<ImageApiResponse>(requestConfig, aiApiUrl(requestConfig, "/images/edits"), payload, options);
+            return parseImagePayload(response);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "xAI 图片生成失败"));
         }
     }
     const quality = normalizeQuality(config.quality);

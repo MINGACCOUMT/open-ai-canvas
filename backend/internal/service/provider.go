@@ -427,6 +427,9 @@ func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkImage) {
 		return runVolcengineArkImageTask(ctx, input)
 	}
+	if input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) {
+		return runXAIImageTask(ctx, input)
+	}
 	var payload imageResponse
 	if input.Mask != nil {
 		// 蒙版编辑是强校验写路径：协议能力不明确时必须失败，不能静默退化为整图重绘。
@@ -543,6 +546,60 @@ func volcengineArkImageBody(input canvasGenerationInput) (map[string]interface{}
 		body["image"] = images[0]
 	} else {
 		body["image"] = images
+	}
+	return body, nil
+}
+
+// runXAIImageTask 对接 xAI 官方图片协议：只发 model/prompt/n/response_format/size 和参考图，
+// 不带 output_format/quality/background 等 xAI 不认字段（会触发 422）。参考图走 image:{url,type}
+// 单图首帧或 images:[{url,type}] 多图编辑（≤3），不支持蒙版。
+func runXAIImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if input.Mask != nil {
+		return nil, errors.New("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试")
+	}
+	body, err := xaiImageBody(input)
+	if err != nil {
+		return nil, err
+	}
+	var payload imageResponse
+	if err := postJSON(ctx, input.Config, "/images/generations", body, &payload); err != nil {
+		return nil, err
+	}
+	images, err := imageDataURLs(payload)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"mode": "image", "images": images}, nil
+}
+
+func xaiImageBody(input canvasGenerationInput) (map[string]interface{}, error) {
+	body := map[string]interface{}{
+		"model":           input.Config.Model,
+		"prompt":          withSystemPrompt(input.Config, input.Prompt),
+		"n":               1,
+		"response_format": "b64_json",
+	}
+	if size := normalizePixelSize(input.Config.Size); size != "" {
+		body["size"] = size
+	}
+	if len(input.ReferenceImages) == 0 {
+		return body, nil
+	}
+	if len(input.ReferenceImages) > 3 {
+		return nil, errors.New("xAI 图片编辑最多支持 3 张参考图")
+	}
+	images := make([]map[string]string, 0, len(input.ReferenceImages))
+	for _, image := range input.ReferenceImages {
+		url, err := openAIImageInputURL(image)
+		if err != nil {
+			return nil, err
+		}
+		images = append(images, map[string]string{"url": url, "type": "image_url"})
+	}
+	if len(images) == 1 {
+		body["image"] = images[0]
+	} else {
+		body["images"] = images
 	}
 	return body, nil
 }
@@ -1684,7 +1741,7 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	}
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true},
-		"image": {"openai-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
+		"image": {"openai-image": true, "xai-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
 		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "volcengine-ark-video": true, "volcengine-jimeng-video": true, "gemini-veo": true},
 		"audio": {"openai-audio": true, "async-audio": true},
 	}

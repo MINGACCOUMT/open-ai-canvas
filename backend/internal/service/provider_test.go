@@ -104,6 +104,110 @@ func TestVolcengineArkImageRejectsMaskBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestXAIImageBodyUsesOfficialImageShapeAndOmitsLegacyFields(t *testing.T) {
+	body, err := xaiImageBody(canvasGenerationInput{
+		Prompt: "render as pencil sketch",
+		Config: providerConfig{Model: "grok-imagine-image-quality", Size: "1024x1024", SystemPrompt: "stay on topic"},
+		ReferenceImages: []providerMedia{
+			{ID: "image-1", DataURL: testReferenceImageDataURL},
+		},
+	})
+	if err != nil {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+	if body["model"] != "grok-imagine-image-quality" || body["prompt"] != "stay on topic\n\nrender as pencil sketch" {
+		t.Fatalf("basic fields = %#v", body)
+	}
+	if body["response_format"] != "b64_json" {
+		t.Fatalf("response_format = %#v", body["response_format"])
+	}
+	if body["size"] != "1024x1024" {
+		t.Fatalf("size = %#v", body["size"])
+	}
+	image, ok := body["image"].(map[string]string)
+	if !ok || image["url"] != testReferenceImageDataURL || image["type"] != "image_url" {
+		t.Fatalf("image = %#v", body["image"])
+	}
+	for _, legacyField := range []string{"output_format", "quality", "background", "images"} {
+		if _, exists := body[legacyField]; exists {
+			t.Fatalf("body includes legacy field %q: %#v", legacyField, body)
+		}
+	}
+}
+
+func TestXAIImageBodyRejectsTooManyReferences(t *testing.T) {
+	_, err := xaiImageBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-image-quality"},
+		ReferenceImages: []providerMedia{
+			{ID: "image-1", DataURL: testReferenceImageDataURL},
+			{ID: "image-2", DataURL: testReferenceImageDataURL},
+			{ID: "image-3", DataURL: testReferenceImageDataURL},
+			{ID: "image-4", DataURL: testReferenceImageDataURL},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "最多支持 3 张参考图") {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+}
+
+func TestXAIImageRejectsMaskBeforeRequest(t *testing.T) {
+	_, err := runImageTask(context.Background(), canvasGenerationInput{
+		Prompt: "edit only the masked area",
+		Config: providerConfig{InterfaceType: "xai-image"},
+		Mask:   &providerMedia{DataURL: testReferenceImageDataURL},
+	})
+	if err == nil || !strings.Contains(err.Error(), "不支持蒙版") {
+		t.Fatalf("runImageTask() error = %v", err)
+	}
+}
+
+func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	var gotBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method+" "+r.URL.Path != "POST /v1/images/generations" {
+			http.NotFound(w, r)
+			return
+		}
+		if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Errorf("Content-Type = %q, want application/json", contentType)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Prompt: "a gray circle",
+		Config: providerConfig{
+			BaseURL:       server.URL,
+			APIKey:        "test-key",
+			Model:         "grok-imagine-image-quality",
+			InterfaceType: "xai-image",
+			Size:          "1024x1024",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v", err)
+	}
+	if gotBody["model"] != "grok-imagine-image-quality" || gotBody["response_format"] != "b64_json" {
+		t.Fatalf("request body = %#v", gotBody)
+	}
+	for _, legacyField := range []string{"output_format", "quality", "background"} {
+		if _, exists := gotBody[legacyField]; exists {
+			t.Fatalf("request body includes legacy field %q: %#v", legacyField, gotBody)
+		}
+	}
+	images, ok := result["images"].([]map[string]string)
+	if !ok || len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+
 func TestNormalizePixelSizeConvertsCanvasAspectRatios(t *testing.T) {
 	tests := map[string]string{
 		"1:1":  "1024x1024",
