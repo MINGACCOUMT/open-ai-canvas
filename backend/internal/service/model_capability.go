@@ -105,6 +105,15 @@ func DefaultImageCapabilityConfig(protocol string, modelName string) *ImageCapab
 		MaxOutputs:            15,
 	}
 	switch model.ChannelInterfaceType(protocol) {
+	case model.ChannelInterfaceXAIImage:
+		// xAI 官方图片：image/images 参考图（≤3），不支持蒙版；不发 quality/output_format。
+		image.References.MaxImages = 3
+		image.References.MaskSupported = false
+		image.Quality = ImageQualityConfig{Supported: false, Default: "auto"}
+		image.TransparentBackground = VideoBooleanConfig{Supported: false, Default: false}
+		image.ResponseFormat = ParameterSupport{Supported: true}
+		image.OutputFormat = ParameterSupport{Supported: false}
+		image.MaxOutputs = 1
 	case model.ChannelInterfaceGrokImage:
 		// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
 		image.References.MaxImages = 3
@@ -130,7 +139,7 @@ func DefaultImageCapabilityConfig(protocol string, modelName string) *ImageCapab
 		image.ResponseFormat.Supported = false
 		image.OutputFormat.Supported = false
 	}
-	if model.ChannelInterfaceType(protocol) != model.ChannelInterfaceGrokImage && strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "grok-imagine-image") {
+	if model.ChannelInterfaceType(protocol) != model.ChannelInterfaceGrokImage && model.ChannelInterfaceType(protocol) != model.ChannelInterfaceXAIImage && strings.HasPrefix(strings.ToLower(strings.TrimSpace(modelName)), "grok-imagine-image") {
 		image.References.MaxImages = 0
 		image.References.MaskSupported = false
 		image.Size = ImageSizeConfig{Parameter: "aspect_ratio", Values: []string{"1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2"}, Default: "1:1", AllowCustom: false}

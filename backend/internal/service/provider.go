@@ -214,12 +214,13 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		// 这些协议把参考图作为 JSON 字段（image/images/reference_image_urls）传给上游，
 		// 聚合网关对 base64 data URI 兼容性差，会静默忽略首帧/参考图导致退化成纯文生图或文生视频。
 		// 必须先把 data URL 换成 OSS 公网 URL 再发。详见 docs/xAI-Grok官方API文档整理.md 第四节。
-		requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" ||
-			input.Config.InterfaceType == "newapi-channel-2" ||
-			input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo) ||
-			input.Config.InterfaceType == string(model.ChannelInterfaceXAIVideo) ||
-			input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage) ||
-			isGrokVideoConfig(input.Config)
+			requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" ||
+				input.Config.InterfaceType == "newapi-channel-2" ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceXAIVideo) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage) ||
+				isGrokVideoConfig(input.Config)
 		if err := s.hydrateGenerationMedia(userID, &input, requirePublicURL); err != nil {
 			return nil, err
 		}
@@ -655,6 +656,11 @@ func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkImage) {
 		return runVolcengineArkImageTask(ctx, input)
 	}
+	// xAI 官方图片：只发 xAI 认的字段（model/prompt/n/response_format/size/image|images），
+	// 绕开默认分支的 output_format/quality 等会让 xAI 与聚合网关 422 的字段。
+	if input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) {
+		return runXAIImageTask(ctx, input)
+	}
 	var payload imageResponse
 	if input.Mask != nil {
 		// 蒙版编辑是强校验写路径：协议能力不明确时必须失败，不能静默退化为整图重绘。
@@ -848,6 +854,68 @@ func grokImageInputURL(media providerMedia) (string, error) {
 		return strings.TrimSpace(media.URL), nil
 	}
 	return openAIImageInputURL(media)
+}
+
+// runXAIImageTask 对接 xAI 官方图片接口（/images/generations / /images/edits）。
+// 与 grokImageTask 不同：只发 xAI 认的字段，固定 response_format=b64_json 避免二次下载和同源鉴权；
+// 不发 output_format/quality/background 等 xAI 未声明、聚合网关会 422 的字段。
+func runXAIImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if input.Mask != nil {
+		return nil, errors.New("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试")
+	}
+	body, err := xaiImageBody(input)
+	if err != nil {
+		return nil, err
+	}
+	var payload imageResponse
+	if err := postJSON(ctx, input.Config, body.path, body.fields, &payload); err != nil {
+		return nil, err
+	}
+	images, err := imageDataURLs(payload)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"mode": "image", "images": images}, nil
+}
+
+// xaiImageBodyFields 让 path 与字段集同时返回，保证调用点用同一条分支决定 generations/edits。
+type xaiImageBodyFields struct {
+	path   string
+	fields map[string]interface{}
+}
+
+func xaiImageBody(input canvasGenerationInput) (xaiImageBodyFields, error) {
+	fields := map[string]interface{}{
+		"model":           input.Config.Model,
+		"prompt":          withSystemPrompt(input.Config, input.Prompt),
+		"n":               1,
+		"response_format": "b64_json",
+	}
+	if key, value := imageSizeParameter(input.ImageCapability, input.Config.Size); value != "" {
+		fields[key] = value
+	}
+	if len(input.ReferenceImages) == 0 {
+		return xaiImageBodyFields{path: "/images/generations", fields: fields}, nil
+	}
+	// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+	if len(input.ReferenceImages) > 3 {
+		return xaiImageBodyFields{}, fmt.Errorf("xAI 官方图片最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
+	}
+	images := make([]map[string]string, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := grokImageInputURL(reference)
+		if err != nil {
+			return xaiImageBodyFields{}, err
+		}
+		// type 必须为 "image_url"，否则上游会把图生图当无效请求拒绝或忽略参考图。
+		images = append(images, map[string]string{"url": imageURL, "type": "image_url"})
+	}
+	if len(images) == 1 {
+		fields["image"] = images[0]
+	} else {
+		fields["images"] = images
+	}
+	return xaiImageBodyFields{path: "/images/edits", fields: fields}, nil
 }
 
 const volcengineArkImageMaxPixels = 4624220
@@ -2022,7 +2090,7 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	}
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true},
-		"image": {"openai-image": true, "grok-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
+		"image": {"openai-image": true, "xai-image": true, "grok-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
 		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "volcengine-ark-video": true, "volcengine-jimeng-video": true, "gemini-veo": true},
 		"audio": {"openai-audio": true, "async-audio": true},
 	}
