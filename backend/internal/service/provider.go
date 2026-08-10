@@ -1398,7 +1398,7 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -1884,7 +1884,7 @@ func runNewAPIChannel1VideoTask(ctx context.Context, input canvasGenerationInput
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -2106,7 +2106,7 @@ func runSeedanceVideosTask(ctx context.Context, input canvasGenerationInput) (ma
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -2409,6 +2409,48 @@ func getJSON(ctx context.Context, config providerConfig, path string, target int
 	req.Header.Set("Authorization", "Bearer "+config.APIKey)
 	ApplyOutboundHeaders(req, config.Headers)
 	return doJSON(req, target)
+}
+
+// 轮询视频状态时，聚合网关、反代或本地代理（TUN 模式）偶发掐断 TCP 连接，
+// 单次失败就放弃会浪费上游已受理的生成任务。这里对这类瞬态网络错误重试。
+func pollVideoJSON(ctx context.Context, config providerConfig, path string, target interface{}) error {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt += 1 {
+		err := getJSON(ctx, config, path, target)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientPollError(err) || attempt == maxAttempts {
+			return err
+		}
+		// 退避等待，但尊重取消信号；不占用轮询窗口太久。
+		if waitErr := sleepContext(ctx, time.Duration(500*attempt)*time.Millisecond); waitErr != nil {
+			return waitErr
+		}
+	}
+	return lastErr
+}
+
+// isTransientPollError 判断是否值得重试的瞬态网络错误：连接重置、超时、EOF、5xx、429。
+// 业务错误（4xx、任务失败等）不重试。
+func isTransientPollError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return true
+	}
+	var httpErr providerHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusRequestTimeout || httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	return false
 }
 
 func postBinary(ctx context.Context, config providerConfig, path string, body interface{}) ([]byte, string, error) {
