@@ -33,4 +33,5 @@ assets/prototypes/.*.drawio.bkp
 .serena/
 .spec-workflow/
 .vscode/
+.zcode/
 camera_language_guide.md
