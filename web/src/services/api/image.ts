@@ -844,6 +844,27 @@ export async function requestGeneration(config: AiConfig, prompt: string, option
             throw new Error(readAxiosError(error, "Grok 图片生成失败"));
         }
     }
+    // xAI 官方图片：只发 xAI 认的字段，固定 response_format=b64_json，不发 output_format/quality 等会触发 422 的字段。
+    if (requestConfig.interfaceType === "xai-image") {
+        const requestSize = resolveImageRequestSize(imageProfile, undefined, normalizedImage.size);
+        try {
+            const responseData = await postChannelJSON<ImageApiResponse>(
+                requestConfig,
+                aiApiUrl(requestConfig, "/images/generations"),
+                {
+                    model: requestConfig.model,
+                    prompt: withSystemPrompt(requestConfig, prompt),
+                    n,
+                    response_format: "b64_json",
+                    ...(requestSize ? { [requestSize.parameter]: requestSize.value } : {}),
+                },
+                options,
+            );
+            return parseImagePayload(responseData);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "xAI 官方图片生成失败"));
+        }
+    }
     const quality = imageProfile.quality.supported && normalizedImage.quality !== "auto" ? normalizeQuality(normalizedImage.quality) || normalizedImage.quality : undefined;
     const requestSize = resolveImageRequestSize(imageProfile, quality, normalizedImage.size);
     const isVolcengineArk = requestConfig.interfaceType === "volcengine-ark-image";
@@ -936,6 +957,32 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             return parseImagePayload(response);
         } catch (error) {
             throw new Error(readAxiosError(error, "Grok 图片编辑失败"));
+        }
+    }
+    if (requestConfig.interfaceType === "xai-image") {
+        if (mask) throw new Error("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试");
+        if (references.length === 0) throw new Error("xAI 官方图片编辑至少需要 1 张参考图");
+        if (references.length > 3) throw new Error("xAI 官方图片编辑最多支持 3 张参考图");
+        const requestSize = resolveImageRequestSize(imageProfile, undefined, normalizedImage.size);
+        try {
+            const imageObjects = await Promise.all(references.map(async (reference) => ({ url: await grokImageInputURL(reference), type: "image_url" as const })));
+            const response = await postChannelJSON<ImageApiResponse>(
+                requestConfig,
+                aiApiUrl(requestConfig, "/images/edits"),
+                {
+                    model: requestConfig.model,
+                    prompt: withSystemPrompt(requestConfig, requestPrompt),
+                    // 单图用 image 字段，多图用 images 数组，与 xAI 官方 image/images 语义对齐。
+                    ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
+                    n,
+                    response_format: "b64_json",
+                    ...(requestSize ? { [requestSize.parameter]: requestSize.value } : {}),
+                },
+                options,
+            );
+            return parseImagePayload(response);
+        } catch (error) {
+            throw new Error(readAxiosError(error, "xAI 官方图片编辑失败"));
         }
     }
     if (requestConfig.interfaceType === "volcengine-ark-image") {

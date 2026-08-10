@@ -289,6 +289,95 @@ func TestGrokImageRequestBodyUsesImagesArrayForMultipleReferences(t *testing.T) 
 	}
 }
 
+// TestRunImageTaskUsesXAIImageEndpoint 验证 xai-image 文生图只发 xAI 认的字段：
+// 走 /images/generations、固定 response_format=b64_json、不发 output_format/quality。
+func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			t.Errorf("path = %q, want /v1/images/generations", r.URL.Path)
+		}
+		if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Errorf("Content-Type = %q, want application/json", contentType)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["model"] != "grok-imagine-image" {
+			t.Fatalf("model = %#v", body["model"])
+		}
+		if body["response_format"] != "b64_json" {
+			t.Fatalf("response_format = %#v, want b64_json", body["response_format"])
+		}
+		// output_format / quality 是 xAI 未声明字段，会让 xAI 与聚合网关 422，必须不发。
+		if _, ok := body["output_format"]; ok {
+			t.Fatalf("output_format should be absent, body = %#v", body)
+		}
+		if _, ok := body["quality"]; ok {
+			t.Fatalf("quality should be absent, body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v", err)
+	}
+	images, _ := result["images"].([]map[string]string)
+	if len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image、多图走 images 数组，且 type 为 image_url。
+func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
+	single, singlePath, err := xaiImageBody(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
+		ReferenceImages: []providerMedia{{URL: "https://example.com/ref.png"}},
+	})
+	if err != nil {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+	if singlePath != "/images/edits" {
+		t.Fatalf("single path = %q, want /images/edits", singlePath)
+	}
+	image, _ := single.fields["image"].(map[string]string)
+	if image == nil || image["url"] != "https://example.com/ref.png" || image["type"] != "image_url" {
+		t.Fatalf("single image = %#v", single.fields["image"])
+	}
+	if _, ok := single.fields["response_format"]; !ok || single.fields["response_format"] != "b64_json" {
+		t.Fatalf("response_format = %#v", single.fields["response_format"])
+	}
+
+	multi, multiPath, err := xaiImageBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
+		ReferenceImages: []providerMedia{
+			{URL: "https://example.com/a.png"},
+			{URL: "https://example.com/b.png"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+	if multiPath != "/images/edits" {
+		t.Fatalf("multi path = %q", multiPath)
+	}
+	images, _ := multi.fields["images"].([]map[string]string)
+	if len(images) != 2 || images[0]["type"] != "image_url" {
+		t.Fatalf("images = %#v", multi.fields["images"])
+	}
+	if _, ok := multi.fields["image"]; ok {
+		t.Fatalf("image should be absent for multi-reference")
+	}
+}
+
 func TestNormalizePixelSizeConvertsCanvasAspectRatios(t *testing.T) {
 	tests := map[string]string{
 		"1:1":  "1024x1024",

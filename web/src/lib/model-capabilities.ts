@@ -89,6 +89,15 @@ export function defaultImageCapabilityConfig(protocol?: ModelProtocol, model = "
         image.responseFormat = { supported: true };
         image.outputFormat = { supported: false };
         image.maxOutputs = 1;
+    } else if (protocol === "xai-image") {
+        // xAI 官方图片：image/images 参考图（≤3），不支持蒙版；不发 quality/output_format。
+        image.references.maxImages = 3;
+        image.references.maskSupported = false;
+        image.quality.supported = false;
+        image.transparentBackground.supported = false;
+        image.responseFormat.supported = true;
+        image.outputFormat.supported = false;
+        image.maxOutputs = 1;
     } else if (protocol === "volcengine-ark-image") {
         image.references.maskSupported = false;
         image.quality.supported = false;
@@ -104,7 +113,7 @@ export function defaultImageCapabilityConfig(protocol?: ModelProtocol, model = "
         image.responseFormat.supported = false;
         image.outputFormat.supported = false;
     }
-    if (protocol !== "grok-image" && model.trim().toLowerCase().startsWith("grok-imagine-image")) {
+    if (protocol !== "grok-image" && protocol !== "xai-image" && model.trim().toLowerCase().startsWith("grok-imagine-image")) {
         image.references.maxImages = 0;
         image.references.maskSupported = false;
         image.size = {
