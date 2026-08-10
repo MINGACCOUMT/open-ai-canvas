@@ -211,7 +211,15 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		}
 	}
 	if resumedProviderRequestID(ctx) == "" {
-		requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" || input.Config.InterfaceType == "newapi-channel-2" || input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo)
+		// 这些协议把参考图作为 JSON 字段（image/images/reference_image_urls）传给上游，
+		// 聚合网关对 base64 data URI 兼容性差，会静默忽略首帧/参考图导致退化成纯文生图或文生视频。
+		// 必须先把 data URL 换成 OSS 公网 URL 再发。详见 docs/xAI-Grok官方API文档整理.md 第四节。
+		requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" ||
+			input.Config.InterfaceType == "newapi-channel-2" ||
+			input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo) ||
+			input.Config.InterfaceType == string(model.ChannelInterfaceXAIVideo) ||
+			input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage) ||
+			isGrokVideoConfig(input.Config)
 		if err := s.hydrateGenerationMedia(userID, &input, requirePublicURL); err != nil {
 			return nil, err
 		}
