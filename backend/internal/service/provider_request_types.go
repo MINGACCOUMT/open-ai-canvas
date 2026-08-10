@@ -64,8 +64,11 @@ type grokImageRequest struct {
 	Resolution string `json:"resolution,omitempty"`
 }
 
+// grokImageInput 对应 xAI 官方 image 字段；type 必须为 "image_url"，
+// 缺失会让上游把图生图当无效请求拒绝或忽略参考图（官方文档第 42/231 行）。
 type grokImageInput struct {
-	URL string `json:"url"`
+	URL  string `json:"url"`
+	Type string `json:"type"`
 }
 
 type geminiVeoRequest struct {

@@ -773,7 +773,7 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 	if err != nil {
 		return grokImageRequest{}, "", err
 	}
-	body.Image = &grokImageInput{URL: imageURL}
+	body.Image = &grokImageInput{URL: imageURL, Type: "image_url"}
 	return body, "/images/edits", nil
 }
 
