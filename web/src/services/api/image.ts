@@ -909,9 +909,11 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
     }
     if (requestConfig.interfaceType === "grok-image") {
         if (mask) throw new Error("Grok 图片协议不支持蒙版编辑，请移除蒙版后重试");
-        if (references.length !== 1) throw new Error("Grok 图片编辑必须提供且仅支持 1 张参考图");
+        // 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+        if (references.length === 0) throw new Error("Grok 图片编辑至少需要 1 张参考图");
+        if (references.length > 3) throw new Error("Grok 图片编辑最多支持 3 张参考图");
         try {
-            const imageUrl = await grokImageInputURL(references[0]);
+            const imageObjects = await Promise.all(references.map(async (reference) => ({ url: await grokImageInputURL(reference), type: "image_url" as const })));
             const size = normalizedImage.size && normalizedImage.size !== "auto" ? normalizedImage.size : undefined;
             const aspectRatio = size?.includes(":") ? size : undefined;
             const resolution = normalizeGrokImageResolution(normalizedImage.quality);
@@ -921,7 +923,8 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 {
                     model: requestConfig.model,
                     prompt: withSystemPrompt(requestConfig, requestPrompt),
-                    image: { url: imageUrl, type: "image_url" },
+                    // 单图用 image 字段，多图用 images 数组，与 xAI 官方 image/images 语义对齐。
+                    ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
                     n,
                     response_format: "url",
                     ...(size ? { size } : {}),
