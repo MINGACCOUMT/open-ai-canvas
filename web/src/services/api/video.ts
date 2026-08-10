@@ -281,13 +281,17 @@ async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, pr
     if (config.interfaceType === "xai-video" || modelName.toLowerCase().includes("grok")) {
         const images = await Promise.all(references.slice(0, 7).map((image) => imageToDataUrl(image)));
         const seconds = normalizeVideoSeconds(config.videoSeconds);
+        // 单图走首帧 image:{url,type}，多图走语义参考 reference_image_urls（官方文档 3.3 节）。
+        const imageField = images.length === 1 ? { image: { url: images[0], type: "image_url" as const } } : {};
+        const referenceField = images.length > 1 ? { reference_image_urls: images } : {};
         const payload = {
             model: modelName,
             prompt,
             duration: Number.parseInt(seconds, 10) || 6,
             seconds,
             ...(normalizeVideoSize(config.size) ? { size: normalizeVideoSize(config.size) } : {}),
-            ...(images.length ? { image: images[0], images } : {}),
+            ...imageField,
+            ...referenceField,
         };
         try {
             const createPath = config.interfaceType === "xai-video" ? "/videos/generations" : "/videos";

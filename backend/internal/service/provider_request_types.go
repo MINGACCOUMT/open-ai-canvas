@@ -40,16 +40,19 @@ type seedanceVideosRequest struct {
 }
 
 type xaiVideoRequest struct {
-	Model       string         `json:"model"`
-	Prompt      string         `json:"prompt"`
-	Duration    int            `json:"duration"`
-	AspectRatio string         `json:"aspect_ratio"`
-	Resolution  string         `json:"resolution"`
-	Image       *xaiVideoImage `json:"image,omitempty"`
+	Model              string         `json:"model"`
+	Prompt             string         `json:"prompt"`
+	Duration           int            `json:"duration"`
+	AspectRatio        string         `json:"aspect_ratio"`
+	Resolution         string         `json:"resolution"`
+	Image              *xaiVideoImage `json:"image,omitempty"`
+	// 多图语义参考（官方字段 reference_image_urls）：只引导风格/主体/构图，不强制首帧。
+	ReferenceImageURLs []string       `json:"reference_image_urls,omitempty"`
 }
 
 type xaiVideoImage struct {
-	URL string `json:"url"`
+	URL  string `json:"url"`
+	Type string `json:"type"`
 }
 
 type grokImageRequest struct {

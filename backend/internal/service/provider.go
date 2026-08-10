@@ -2082,14 +2082,25 @@ func xaiVideoRequestBody(input canvasGenerationInput) (xaiVideoRequest, error) {
 	if !shouldSendNewAPIVideoImages(input) || len(input.ReferenceImages) == 0 {
 		return body, nil
 	}
-	if len(input.ReferenceImages) > 1 {
-		return xaiVideoRequest{}, fmt.Errorf("xAI 图生视频只支持 1 张起始图，当前连接了 %d 张", len(input.ReferenceImages))
+	// 单图走首帧模式 image:{url,type}；多图走语义参考 reference_image_urls，
+	// 两种字段语义不同（官方文档 3.3 节），混用会导致参考图被上游忽略。
+	if len(input.ReferenceImages) == 1 {
+		imageURL, err := openAIImageInputURL(input.ReferenceImages[0])
+		if err != nil {
+			return xaiVideoRequest{}, err
+		}
+		body.Image = &xaiVideoImage{URL: imageURL, Type: "image_url"}
+		return body, nil
 	}
-	imageURL, err := openAIImageInputURL(input.ReferenceImages[0])
-	if err != nil {
-		return xaiVideoRequest{}, err
+	references := make([]string, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := openAIImageInputURL(reference)
+		if err != nil {
+			return xaiVideoRequest{}, err
+		}
+		references = append(references, imageURL)
 	}
-	body.Image = &xaiVideoImage{URL: imageURL}
+	body.ReferenceImageURLs = references
 	return body, nil
 }
 

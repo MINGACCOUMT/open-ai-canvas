@@ -749,10 +749,13 @@ func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 	if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
 		t.Fatalf("image = %#v", body.Image)
 	}
+	if body.Image.Type != "image_url" {
+		t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+	}
 }
 
-func TestXAIVideoBodyRejectsMultipleStartImages(t *testing.T) {
-	_, err := xaiVideoRequestBody(canvasGenerationInput{
+func TestXAIVideoBodyUsesReferenceImageURLsForMultipleImages(t *testing.T) {
+	body, err := xaiVideoRequestBody(canvasGenerationInput{
 		Config: providerConfig{Model: "grok-imagine-video-1.5", InterfaceType: "xai-video"},
 		ReferenceImages: []providerMedia{
 			{ID: "image-1", DataURL: testReferenceImageDataURL},
@@ -760,8 +763,15 @@ func TestXAIVideoBodyRejectsMultipleStartImages(t *testing.T) {
 		},
 		Metadata: map[string]interface{}{"videoEditOperation": "image_to_video"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "只支持 1 张起始图") {
-		t.Fatalf("grokVideoBody() error = %v", err)
+	if err != nil {
+		t.Fatalf("xaiVideoRequestBody() error = %v", err)
+	}
+	// 多图走语义参考数组，首帧 image 必须留空，避免两种语义混用。
+	if body.Image != nil {
+		t.Fatalf("image = %#v, want nil for multiple references", body.Image)
+	}
+	if len(body.ReferenceImageURLs) != 2 || body.ReferenceImageURLs[0] != testReferenceImageDataURL {
+		t.Fatalf("reference_image_urls = %#v", body.ReferenceImageURLs)
 	}
 }
 
