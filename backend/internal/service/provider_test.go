@@ -177,6 +177,10 @@ func TestRunGrokImageTaskUsesJSONEditContract(t *testing.T) {
 		if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
 			t.Fatalf("image = %#v", body.Image)
 		}
+		// xAI 官方 image 字段要求 {url, type:"image_url"}；缺 type 会被上游当无效图生图请求。
+		if body.Image.Type != "image_url" {
+			t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.com/result.png"}]}`))
 	}))
@@ -250,6 +254,9 @@ func TestGrokImageRequestBodyPrefersPublicURL(t *testing.T) {
 	}
 	if path != "/images/edits" || body.Image == nil || body.Image.URL != "https://example.com/reference.png" {
 		t.Fatalf("path = %q, image = %#v", path, body.Image)
+	}
+	if body.Image.Type != "image_url" {
+		t.Fatalf("image.type = %q, want image_url", body.Image.Type)
 	}
 }
 

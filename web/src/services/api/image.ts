@@ -921,7 +921,7 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
                 {
                     model: requestConfig.model,
                     prompt: withSystemPrompt(requestConfig, requestPrompt),
-                    image: { url: imageUrl },
+                    image: { url: imageUrl, type: "image_url" },
                     n,
                     response_format: "url",
                     ...(size ? { size } : {}),
