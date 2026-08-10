@@ -766,14 +766,23 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 	if len(input.ReferenceImages) == 0 {
 		return body, "/images/generations", nil
 	}
-	if len(input.ReferenceImages) != 1 {
-		return grokImageRequest{}, "", fmt.Errorf("Grok 图片编辑只支持 1 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
+	// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+	if len(input.ReferenceImages) > 3 {
+		return grokImageRequest{}, "", fmt.Errorf("Grok 图片编辑最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
 	}
-	imageURL, err := grokImageInputURL(input.ReferenceImages[0])
-	if err != nil {
-		return grokImageRequest{}, "", err
+	images := make([]grokImageInput, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := grokImageInputURL(reference)
+		if err != nil {
+			return grokImageRequest{}, "", err
+		}
+		images = append(images, grokImageInput{URL: imageURL, Type: "image_url"})
 	}
-	body.Image = &grokImageInput{URL: imageURL, Type: "image_url"}
+	if len(images) == 1 {
+		body.Image = &images[0]
+	} else {
+		body.Images = images
+	}
 	return body, "/images/edits", nil
 }
 

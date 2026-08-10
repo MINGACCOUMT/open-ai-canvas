@@ -106,7 +106,8 @@ func DefaultImageCapabilityConfig(protocol string, modelName string) *ImageCapab
 	}
 	switch model.ChannelInterfaceType(protocol) {
 	case model.ChannelInterfaceGrokImage:
-		image.References.MaxImages = 1
+		// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+		image.References.MaxImages = 3
 		image.References.MaskSupported = false
 		// grok2api / xAI Imagine：size→aspect_ratio，quality→resolution(1k/2k)。
 		image.Size = ImageSizeConfig{Parameter: "aspect_ratio", Values: []string{"1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2"}, Default: "1:1", AllowCustom: false}

@@ -235,12 +235,13 @@ func TestNormalizeGrokImageResolution(t *testing.T) {
 	}
 }
 
-func TestGrokImageRequestBodyRejectsMaskAndMultipleReferences(t *testing.T) {
+func TestGrokImageRequestBodyRejectsMaskAndTooManyReferences(t *testing.T) {
 	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, Mask: &providerMedia{DataURL: testReferenceImageDataURL}}); err == nil || !strings.Contains(err.Error(), "不支持蒙版") {
 		t.Fatalf("mask error = %v", err)
 	}
-	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, ReferenceImages: []providerMedia{{DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}}}); err == nil || !strings.Contains(err.Error(), "只支持 1 张") {
-		t.Fatalf("multiple reference error = %v", err)
+	// 官方支持最多 3 张；超过 3 张才报错。
+	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, ReferenceImages: []providerMedia{{DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}}}); err == nil || !strings.Contains(err.Error(), "最多支持 3 张") {
+		t.Fatalf("too many reference error = %v", err)
 	}
 }
 
@@ -257,6 +258,34 @@ func TestGrokImageRequestBodyPrefersPublicURL(t *testing.T) {
 	}
 	if body.Image.Type != "image_url" {
 		t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+	}
+}
+
+// 多图编辑（2~3 张）走 images 数组，每项 {url, type:"image_url"}，与官方 images 字段对齐。
+func TestGrokImageRequestBodyUsesImagesArrayForMultipleReferences(t *testing.T) {
+	body, path, err := grokImageRequestBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-image", InterfaceType: "grok-image"},
+		ReferenceImages: []providerMedia{
+			{URL: "https://example.com/a.png"},
+			{URL: "https://example.com/b.png"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("grokImageRequestBody() error = %v", err)
+	}
+	if path != "/images/edits" {
+		t.Fatalf("path = %q, want /images/edits", path)
+	}
+	if body.Image != nil {
+		t.Fatalf("image = %#v, want nil for multi-reference", body.Image)
+	}
+	if len(body.Images) != 2 {
+		t.Fatalf("images len = %d, want 2", len(body.Images))
+	}
+	for index, image := range body.Images {
+		if image.Type != "image_url" {
+			t.Fatalf("images[%d].type = %q, want image_url", index, image.Type)
+		}
 	}
 }
 
