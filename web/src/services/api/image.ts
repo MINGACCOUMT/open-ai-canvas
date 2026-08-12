@@ -938,14 +938,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
             const size = normalizedImage.size && normalizedImage.size !== "auto" ? normalizedImage.size : undefined;
             const aspectRatio = size?.includes(":") ? size : undefined;
             const resolution = normalizeGrokImageResolution(normalizedImage.quality);
+            // 单图必须用 image_url 字符串：OSS 签名 URL 常带 attachment 强制下载头，
+            // 用 image:{url,type} 会被上游 400；多图仍走 images 数组。
+            const referenceFields = imageObjects.length === 1 ? { image_url: imageObjects[0].url } : { images: imageObjects };
             const response = await postChannelJSON<ImageApiResponse>(
                 requestConfig,
                 aiApiUrl(requestConfig, "/images/edits"),
                 {
                     model: requestConfig.model,
                     prompt: withSystemPrompt(requestConfig, requestPrompt),
-                    // 单图用 image 字段，多图用 images 数组，与 xAI 官方 image/images 语义对齐。
-                    ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
+                    ...referenceFields,
                     n,
                     response_format: "url",
                     ...(size ? { size } : {}),
@@ -966,14 +968,16 @@ export async function requestEdit(config: AiConfig, prompt: string, references: 
         const requestSize = resolveImageRequestSize(imageProfile, undefined, normalizedImage.size);
         try {
             const imageObjects = await Promise.all(references.map(async (reference) => ({ url: await grokImageInputURL(reference), type: "image_url" as const })));
+            // 单图必须用 image_url 字符串：OSS 签名 URL 常带 attachment 强制下载头，
+            // 用 image:{url,type} 会被上游 400；多图仍走 images 数组。
+            const referenceFields = imageObjects.length === 1 ? { image_url: imageObjects[0].url } : { images: imageObjects };
             const response = await postChannelJSON<ImageApiResponse>(
                 requestConfig,
                 aiApiUrl(requestConfig, "/images/edits"),
                 {
                     model: requestConfig.model,
                     prompt: withSystemPrompt(requestConfig, requestPrompt),
-                    // 单图用 image 字段，多图用 images 数组，与 xAI 官方 image/images 语义对齐。
-                    ...(imageObjects.length === 1 ? { image: imageObjects[0] } : { images: imageObjects }),
+                    ...referenceFields,
                     n,
                     response_format: "b64_json",
                     ...(requestSize ? { [requestSize.parameter]: requestSize.value } : {}),

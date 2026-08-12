@@ -58,6 +58,10 @@ type xaiVideoImage struct {
 type grokImageRequest struct {
 	Model          string           `json:"model"`
 	Prompt         string           `json:"prompt"`
+	// ImageURL 是单图编辑的稳妥字段（SDK 风格字符串）。
+	// 实测：带 Content-Disposition:attachment 的 OSS 签名 URL 用 image:{url,type} 会被 xAI 拒收 400，
+	// 改 image_url 字符串后同样 URL 可通过。
+	ImageURL       string           `json:"image_url,omitempty"`
 	Image          *grokImageInput  `json:"image,omitempty"`
 	Images         []grokImageInput `json:"images,omitempty"`
 	N              int              `json:"n"`
@@ -68,8 +72,8 @@ type grokImageRequest struct {
 	Resolution string `json:"resolution,omitempty"`
 }
 
-// grokImageInput 对应 xAI 官方 image 字段；type 必须为 "image_url"，
-// 缺失会让上游把图生图当无效请求拒绝或忽略参考图（官方文档第 42/231 行）。
+// grokImageInput 对应 xAI 官方 image/images 数组项；type 必须为 "image_url"。
+// 单图优先走 ImageURL 字符串；多图仍用 images 数组。
 type grokImageInput struct {
 	URL  string `json:"url"`
 	Type string `json:"type"`

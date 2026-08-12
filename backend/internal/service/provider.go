@@ -772,7 +772,9 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 	if len(input.ReferenceImages) == 0 {
 		return body, "/images/generations", nil
 	}
-	// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+	// 官方支持单图 image_url（SDK 风格）与多图 images（≤3，风格融合/多图编辑）。
+	// 单图必须用 image_url 字符串：OSS 签名 URL 常带 attachment 强制下载头，
+	// 用 image:{url,type} 会被上游 400，image_url 字符串可过。
 	if len(input.ReferenceImages) > 3 {
 		return grokImageRequest{}, "", fmt.Errorf("Grok 图片编辑最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
 	}
@@ -785,7 +787,7 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 		images = append(images, grokImageInput{URL: imageURL, Type: "image_url"})
 	}
 	if len(images) == 1 {
-		body.Image = &images[0]
+		body.ImageURL = images[0].URL
 	} else {
 		body.Images = images
 	}
@@ -897,7 +899,9 @@ func xaiImageBody(input canvasGenerationInput) (xaiImageBodyFields, error) {
 	if len(input.ReferenceImages) == 0 {
 		return xaiImageBodyFields{path: "/images/generations", fields: fields}, nil
 	}
-	// 官方支持单图 image（首帧/编辑）与多图 images（≤3，风格融合/多图编辑）。
+	// 官方支持单图 image_url（SDK 风格字符串）与多图 images（≤3）。
+	// 单图不走 image:{url,type}：实测 OSS 签名 URL（Content-Disposition:attachment）
+	// 用对象形态会被 xAI 400，改 image_url 字符串后同样 URL 可成功。
 	if len(input.ReferenceImages) > 3 {
 		return xaiImageBodyFields{}, fmt.Errorf("xAI 官方图片最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
 	}
@@ -907,11 +911,10 @@ func xaiImageBody(input canvasGenerationInput) (xaiImageBodyFields, error) {
 		if err != nil {
 			return xaiImageBodyFields{}, err
 		}
-		// type 必须为 "image_url"，否则上游会把图生图当无效请求拒绝或忽略参考图。
 		images = append(images, map[string]string{"url": imageURL, "type": "image_url"})
 	}
 	if len(images) == 1 {
-		fields["image"] = images[0]
+		fields["image_url"] = images[0]["url"]
 	} else {
 		fields["images"] = images
 	}
@@ -3190,3 +3193,5 @@ func seedanceErrorMessage(state map[string]interface{}) string {
 	}
 	return ""
 }
+
+

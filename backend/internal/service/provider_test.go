@@ -174,12 +174,12 @@ func TestRunGrokImageTaskUsesJSONEditContract(t *testing.T) {
 		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "url" {
 			t.Fatalf("request body = %#v", body)
 		}
-		if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
-			t.Fatalf("image = %#v", body.Image)
+		// 单图走 image_url 字符串，兼容 OSS 强制下载头；不要用 image:{url,type}。
+		if body.ImageURL != testReferenceImageDataURL {
+			t.Fatalf("image_url = %#v", body.ImageURL)
 		}
-		// xAI 官方 image 字段要求 {url, type:"image_url"}；缺 type 会被上游当无效图生图请求。
-		if body.Image.Type != "image_url" {
-			t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+		if body.Image != nil {
+			t.Fatalf("image object should be nil for single reference, got %#v", body.Image)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.com/result.png"}]}`))
@@ -253,11 +253,11 @@ func TestGrokImageRequestBodyPrefersPublicURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grokImageRequestBody() error = %v", err)
 	}
-	if path != "/images/edits" || body.Image == nil || body.Image.URL != "https://example.com/reference.png" {
-		t.Fatalf("path = %q, image = %#v", path, body.Image)
+	if path != "/images/edits" || body.ImageURL != "https://example.com/reference.png" {
+		t.Fatalf("path = %q, image_url = %#v", path, body.ImageURL)
 	}
-	if body.Image.Type != "image_url" {
-		t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+	if body.Image != nil {
+		t.Fatalf("image object should be nil for single reference, got %#v", body.Image)
 	}
 }
 
@@ -336,27 +336,31 @@ func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
 	}
 }
 
-// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image、多图走 images 数组，且 type 为 image_url。
+// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image_url 字符串、多图走 images 数组。
+// 单图不用 image:{url,type}：OSS 签名 URL 带 attachment 时该形态会被上游 400。
 func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
-	single, singlePath, err := xaiImageBody(canvasGenerationInput{
+	single, err := xaiImageBody(canvasGenerationInput{
 		Config:          providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
 		ReferenceImages: []providerMedia{{URL: "https://example.com/ref.png"}},
 	})
 	if err != nil {
 		t.Fatalf("xaiImageBody() error = %v", err)
 	}
-	if singlePath != "/images/edits" {
-		t.Fatalf("single path = %q, want /images/edits", singlePath)
+	if single.path != "/images/edits" {
+		t.Fatalf("single path = %q, want /images/edits", single.path)
 	}
-	image, _ := single.fields["image"].(map[string]string)
-	if image == nil || image["url"] != "https://example.com/ref.png" || image["type"] != "image_url" {
-		t.Fatalf("single image = %#v", single.fields["image"])
+	imageURL, _ := single.fields["image_url"].(string)
+	if imageURL != "https://example.com/ref.png" {
+		t.Fatalf("single image_url = %#v", single.fields["image_url"])
+	}
+	if _, ok := single.fields["image"]; ok {
+		t.Fatalf("image object should be absent for single reference, got %#v", single.fields["image"])
 	}
 	if _, ok := single.fields["response_format"]; !ok || single.fields["response_format"] != "b64_json" {
 		t.Fatalf("response_format = %#v", single.fields["response_format"])
 	}
 
-	multi, multiPath, err := xaiImageBody(canvasGenerationInput{
+	multi, err := xaiImageBody(canvasGenerationInput{
 		Config: providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
 		ReferenceImages: []providerMedia{
 			{URL: "https://example.com/a.png"},
@@ -366,8 +370,8 @@ func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("xaiImageBody() error = %v", err)
 	}
-	if multiPath != "/images/edits" {
-		t.Fatalf("multi path = %q", multiPath)
+	if multi.path != "/images/edits" {
+		t.Fatalf("multi path = %q", multi.path)
 	}
 	images, _ := multi.fields["images"].([]map[string]string)
 	if len(images) != 2 || images[0]["type"] != "image_url" {
@@ -375,6 +379,9 @@ func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
 	}
 	if _, ok := multi.fields["image"]; ok {
 		t.Fatalf("image should be absent for multi-reference")
+	}
+	if _, ok := multi.fields["image_url"]; ok {
+		t.Fatalf("image_url should be absent for multi-reference")
 	}
 }
 
@@ -1332,3 +1339,4 @@ func TestEquivalentStyleProfileJSONIgnoresObjectKeyOrder(t *testing.T) {
 		t.Fatalf("equivalentStyleProfileJSON() equal = %v, err = %v", equal, err)
 	}
 }
+
