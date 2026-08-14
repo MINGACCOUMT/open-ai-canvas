@@ -150,6 +150,8 @@ async function pollVideoGenerationsTask(config: ResolvedAiConfig, task: VideoGen
         if (status === "FAILURE" || status === "FAILED" || status === "CANCELLED") return { status: "failed", error: String(state.fail_reason || state.error || "视频生成失败") };
         return { status: "pending" };
     } catch (error) {
+        // 瞬时错误（429/5xx/无响应）继续轮询，不中断整条生成。
+        if (isTransientPollError(error)) return { status: "pending" };
         throw new Error(readAxiosError(error, "NewAPI Video Generations 任务查询失败"));
     }
 }
@@ -205,6 +207,8 @@ async function pollGeminiVeoTask(config: ResolvedAiConfig, task: VideoGeneration
         await assertVideoBlob(blob);
         return { status: "completed", result: { blob } };
     } catch (error) {
+        // 瞬时错误（429/5xx/无响应）继续轮询，不中断整条生成。
+        if (isTransientPollError(error)) return { status: "pending" };
         throw new Error(readAxiosError(error, "Gemini Veo 任务查询失败"));
     }
 }
@@ -333,13 +337,17 @@ async function createOpenAIVideoTask(config: ResolvedAiConfig, model: string, pr
     if (config.interfaceType === "xai-video" || modelName.toLowerCase().includes("grok")) {
         const images = await Promise.all(references.slice(0, 7).map((image) => imageToDataUrl(image)));
         const seconds = normalizeVideoSeconds(config.videoSeconds);
+        // 单图走首帧 image:{url,type}，多图走语义参考 reference_image_urls（官方文档 3.3 节）。
+        const imageField = images.length === 1 ? { image: { url: images[0], type: "image_url" as const } } : {};
+        const referenceField = images.length > 1 ? { reference_image_urls: images } : {};
         const payload = {
             model: modelName,
             prompt,
             duration: Number.parseInt(seconds, 10) || 6,
             seconds,
             ...(normalizeVideoSize(config.size) ? { size: normalizeVideoSize(config.size) } : {}),
-            ...(images.length ? { image: images[0], images } : {}),
+            ...imageField,
+            ...referenceField,
         };
         try {
             const createPath = config.interfaceType === "xai-video" ? "/videos/generations" : "/videos";
@@ -382,6 +390,8 @@ async function pollOpenAIVideoTask(config: ResolvedAiConfig, task: VideoGenerati
         if (video.status === "failed" || video.status === "cancelled") return { status: "failed", error: video.error?.message || "视频生成失败" };
         return { status: "pending" };
     } catch (error) {
+        // 瞬时错误（429/5xx/无响应）继续轮询，等下一次拿到 done，不中断整条生成。
+        if (isTransientPollError(error)) return { status: "pending" };
         throw new Error(readAxiosError(error, "视频任务查询失败"));
     }
 }
@@ -421,6 +431,8 @@ async function pollSeedanceTask(config: ResolvedAiConfig, task: VideoGenerationT
         if (state.status === "failed" || state.status === "cancelled" || state.status === "expired") return { status: "failed", error: seedanceErrorMessage(state) || `Seedance 视频生成${state.status === "expired" ? "超时" : "失败"}` };
         return { status: "pending" };
     } catch (error) {
+        // 瞬时错误（429/5xx/无响应）继续轮询，不中断整条生成。
+        if (isTransientPollError(error)) return { status: "pending" };
         throw new Error(readAxiosError(error, "Seedance 任务查询失败"));
     }
 }
@@ -664,6 +676,18 @@ function statusMessage(status: number | undefined, fallback: string) {
     if (status === 401 || status === 403) return "鉴权失败，请检查 API Key、套餐权限或模型权限";
     if (status === 429) return "请求被限流或额度不足，请稍后重试";
     return status ? `${fallback}（${status}）` : fallback;
+}
+
+// 判断轮询遇到的错误是否属于可继续轮询的瞬时错误。
+// 网关过载（500/502/503/504）、限流（429）或完全无响应（网络抖动）时，任务在 upstream 仍在运行，
+// 单次轮询失败不应让整个视频生成中止——下一次轮询很可能就拿到 done 结果。
+// 用户主动取消（AbortError/Canceled）必须照常抛出，不算瞬时错误。
+function isTransientPollError(error: unknown): boolean {
+    if (axios.isCancel(error)) return false;
+    if (error instanceof DOMException && error.name === "AbortError") return false;
+    if (!axios.isAxiosError(error)) return false;
+    const status = error.response?.status;
+    return status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === undefined;
 }
 
 async function assertVideoBlob(blob: Blob) {

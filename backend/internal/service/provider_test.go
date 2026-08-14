@@ -195,8 +195,12 @@ func TestRunGrokImageTaskUsesJSONEditContract(t *testing.T) {
 		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "url" {
 			t.Fatalf("request body = %#v", body)
 		}
-		if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
-			t.Fatalf("image = %#v", body.Image)
+		// 单图走 image_url 字符串，兼容 OSS 强制下载头；不要用 image:{url,type}。
+		if body.ImageURL != testReferenceImageDataURL {
+			t.Fatalf("image_url = %#v", body.ImageURL)
+		}
+		if body.Image != nil {
+			t.Fatalf("image object should be nil for single reference, got %#v", body.Image)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"url":"https://example.com/result.png"}]}`))
@@ -264,12 +268,13 @@ func TestNormalizeGrokImageResolution(t *testing.T) {
 	}
 }
 
-func TestGrokImageRequestBodyRejectsMaskAndMultipleReferences(t *testing.T) {
+func TestGrokImageRequestBodyRejectsMaskAndTooManyReferences(t *testing.T) {
 	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, Mask: &providerMedia{DataURL: testReferenceImageDataURL}}); err == nil || !strings.Contains(err.Error(), "不支持蒙版") {
 		t.Fatalf("mask error = %v", err)
 	}
-	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, ReferenceImages: []providerMedia{{DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}}}); err == nil || !strings.Contains(err.Error(), "只支持 1 张") {
-		t.Fatalf("multiple reference error = %v", err)
+	// 官方支持最多 3 张；超过 3 张才报错。
+	if _, _, err := grokImageRequestBody(canvasGenerationInput{Config: providerConfig{InterfaceType: "grok-image"}, ReferenceImages: []providerMedia{{DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}, {DataURL: testReferenceImageDataURL}}}); err == nil || !strings.Contains(err.Error(), "最多支持 3 张") {
+		t.Fatalf("too many reference error = %v", err)
 	}
 }
 
@@ -281,8 +286,135 @@ func TestGrokImageRequestBodyPrefersPublicURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grokImageRequestBody() error = %v", err)
 	}
-	if path != "/images/edits" || body.Image == nil || body.Image.URL != "https://example.com/reference.png" {
-		t.Fatalf("path = %q, image = %#v", path, body.Image)
+	if path != "/images/edits" || body.ImageURL != "https://example.com/reference.png" {
+		t.Fatalf("path = %q, image_url = %#v", path, body.ImageURL)
+	}
+	if body.Image != nil {
+		t.Fatalf("image object should be nil for single reference, got %#v", body.Image)
+	}
+}
+
+// 多图编辑（2~3 张）走 images 数组，每项 {url, type:"image_url"}，与官方 images 字段对齐。
+func TestGrokImageRequestBodyUsesImagesArrayForMultipleReferences(t *testing.T) {
+	body, path, err := grokImageRequestBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-image", InterfaceType: "grok-image"},
+		ReferenceImages: []providerMedia{
+			{URL: "https://example.com/a.png"},
+			{URL: "https://example.com/b.png"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("grokImageRequestBody() error = %v", err)
+	}
+	if path != "/images/edits" {
+		t.Fatalf("path = %q, want /images/edits", path)
+	}
+	if body.Image != nil {
+		t.Fatalf("image = %#v, want nil for multi-reference", body.Image)
+	}
+	if len(body.Images) != 2 {
+		t.Fatalf("images len = %d, want 2", len(body.Images))
+	}
+	for index, image := range body.Images {
+		if image.Type != "image_url" {
+			t.Fatalf("images[%d].type = %q, want image_url", index, image.Type)
+		}
+	}
+}
+
+// TestRunImageTaskUsesXAIImageEndpoint 验证 xai-image 文生图只发 xAI 认的字段：
+// 走 /images/generations、固定 response_format=b64_json、不发 output_format/quality。
+func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/generations" {
+			t.Errorf("path = %q, want /v1/images/generations", r.URL.Path)
+		}
+		if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Errorf("Content-Type = %q, want application/json", contentType)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		if body["model"] != "grok-imagine-image" {
+			t.Fatalf("model = %#v", body["model"])
+		}
+		if body["response_format"] != "b64_json" {
+			t.Fatalf("response_format = %#v, want b64_json", body["response_format"])
+		}
+		// output_format / quality 是 xAI 未声明字段，会让 xAI 与聚合网关 422，必须不发。
+		if _, ok := body["output_format"]; ok {
+			t.Fatalf("output_format should be absent, body = %#v", body)
+		}
+		if _, ok := body["quality"]; ok {
+			t.Fatalf("quality should be absent, body = %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v", err)
+	}
+	images, _ := result["images"].([]map[string]string)
+	if len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image_url 字符串、多图走 images 数组。
+// 单图不用 image:{url,type}：OSS 签名 URL 带 attachment 时该形态会被上游 400。
+func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
+	single, err := xaiImageBody(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
+		ReferenceImages: []providerMedia{{URL: "https://example.com/ref.png"}},
+	})
+	if err != nil {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+	if single.path != "/images/edits" {
+		t.Fatalf("single path = %q, want /images/edits", single.path)
+	}
+	imageURL, _ := single.fields["image_url"].(string)
+	if imageURL != "https://example.com/ref.png" {
+		t.Fatalf("single image_url = %#v", single.fields["image_url"])
+	}
+	if _, ok := single.fields["image"]; ok {
+		t.Fatalf("image object should be absent for single reference, got %#v", single.fields["image"])
+	}
+	if _, ok := single.fields["response_format"]; !ok || single.fields["response_format"] != "b64_json" {
+		t.Fatalf("response_format = %#v", single.fields["response_format"])
+	}
+
+	multi, err := xaiImageBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
+		ReferenceImages: []providerMedia{
+			{URL: "https://example.com/a.png"},
+			{URL: "https://example.com/b.png"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("xaiImageBody() error = %v", err)
+	}
+	if multi.path != "/images/edits" {
+		t.Fatalf("multi path = %q", multi.path)
+	}
+	images, _ := multi.fields["images"].([]map[string]string)
+	if len(images) != 2 || images[0]["type"] != "image_url" {
+		t.Fatalf("images = %#v", multi.fields["images"])
+	}
+	if _, ok := multi.fields["image"]; ok {
+		t.Fatalf("image should be absent for multi-reference")
+	}
+	if _, ok := multi.fields["image_url"]; ok {
+		t.Fatalf("image_url should be absent for multi-reference")
 	}
 }
 
@@ -724,7 +856,7 @@ func TestRunVideoTaskUsesXAIVideoGenerationEndpoint(t *testing.T) {
 	}
 }
 
-func TestXAIVideoBodyWithoutStartFramePutsAllImagesIntoReferenceImages(t *testing.T) {
+func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 	body, err := xaiVideoRequestBody(canvasGenerationInput{
 		Prompt: "make it move",
 		Config: providerConfig{
@@ -734,6 +866,26 @@ func TestXAIVideoBodyWithoutStartFramePutsAllImagesIntoReferenceImages(t *testin
 			Size:          "1024x1792",
 			VQuality:      "1080",
 		},
+		ReferenceImages: []providerMedia{{ID: "image-1", DataURL: testReferenceImageDataURL}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "image_to_video"},
+	})
+	if err != nil {
+		t.Fatalf("xaiVideoRequestBody() error = %v", err)
+	}
+	if body.Duration != 20 || body.AspectRatio != "9:16" || body.Resolution != "1080p" {
+		t.Fatalf("xAI settings = %#v", body)
+	}
+	if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
+		t.Fatalf("image = %#v", body.Image)
+	}
+	if body.Image.Type != "image_url" {
+		t.Fatalf("image.type = %q, want image_url", body.Image.Type)
+	}
+}
+
+func TestXAIVideoBodyUsesReferenceImageURLsForMultipleImages(t *testing.T) {
+	body, err := xaiVideoRequestBody(canvasGenerationInput{
+		Config: providerConfig{Model: "grok-imagine-video-1.5", InterfaceType: "xai-video"},
 		ReferenceImages: []providerMedia{
 			{ID: "image-1", DataURL: testReferenceImageDataURL},
 			{ID: "image-2", DataURL: testReferenceImageDataURL},
@@ -743,14 +895,12 @@ func TestXAIVideoBodyWithoutStartFramePutsAllImagesIntoReferenceImages(t *testin
 	if err != nil {
 		t.Fatalf("xaiVideoRequestBody() error = %v", err)
 	}
-	if body.Duration != 20 || body.AspectRatio != "9:16" || body.Resolution != "1080p" {
-		t.Fatalf("xAI settings = %#v", body)
-	}
+	// 多图走语义参考数组，首帧 image 必须留空，避免两种语义混用。
 	if body.Image != nil {
-		t.Fatalf("image should be nil without start frame, got %#v", body.Image)
+		t.Fatalf("image = %#v, want nil for multiple references", body.Image)
 	}
-	if len(body.ReferenceImages) != 2 || body.ReferenceImages[0].URL != testReferenceImageDataURL || body.ReferenceImages[1].URL != testReferenceImageDataURL {
-		t.Fatalf("reference_images = %#v", body.ReferenceImages)
+	if len(body.ReferenceImageURLs) != 2 || body.ReferenceImageURLs[0] != testReferenceImageDataURL {
+		t.Fatalf("reference_image_urls = %#v", body.ReferenceImageURLs)
 	}
 }
 
@@ -765,11 +915,11 @@ func TestXAIVideoBodyWithStartFrameKeepsOfficialImageShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("xaiVideoRequestBody() error = %v", err)
 	}
-	if body.Image == nil || body.Image.URL != testReferenceImageDataURL {
+	if body.Image == nil || body.Image.URL != testReferenceImageDataURL || body.Image.Type != "image_url" {
 		t.Fatalf("image = %#v", body.Image)
 	}
-	if len(body.ReferenceImages) != 0 {
-		t.Fatalf("reference_images = %#v", body.ReferenceImages)
+	if len(body.ReferenceImageURLs) != 0 {
+		t.Fatalf("reference_image_urls = %#v", body.ReferenceImageURLs)
 	}
 }
 

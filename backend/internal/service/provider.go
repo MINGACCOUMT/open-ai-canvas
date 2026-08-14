@@ -211,7 +211,16 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		}
 	}
 	if resumedProviderRequestID(ctx) == "" {
-		requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" || input.Config.InterfaceType == "newapi-channel-2" || input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo)
+		// 这些协议把参考图作为 JSON 字段（image/images/reference_image_urls）传给上游，
+		// 聚合网关对 base64 data URI 兼容性差，会静默忽略首帧/参考图导致退化成纯文生图或文生视频。
+		// 必须先把 data URL 换成 OSS 公网 URL 再发。详见 docs/xAI-Grok官方API文档整理.md 第四节。
+			requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" ||
+				input.Config.InterfaceType == "newapi-channel-2" ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkVideo) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceXAIVideo) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) ||
+				input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage) ||
+				isGrokVideoConfig(input.Config)
 		if err := s.hydrateGenerationMedia(userID, &input, requirePublicURL); err != nil {
 			return nil, err
 		}
@@ -647,6 +656,11 @@ func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if input.Config.InterfaceType == string(model.ChannelInterfaceVolcengineArkImage) {
 		return runVolcengineArkImageTask(ctx, input)
 	}
+	// xAI 官方图片：只发 xAI 认的字段（model/prompt/n/response_format/size/image|images），
+	// 绕开默认分支的 output_format/quality 等会让 xAI 与聚合网关 422 的字段。
+	if input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) {
+		return runXAIImageTask(ctx, input)
+	}
 	var payload imageResponse
 	if input.Mask != nil {
 		// 蒙版编辑是强校验写路径：协议能力不明确时必须失败，不能静默退化为整图重绘。
@@ -758,14 +772,25 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 	if len(input.ReferenceImages) == 0 {
 		return body, "/images/generations", nil
 	}
-	if len(input.ReferenceImages) != 1 {
-		return grokImageRequest{}, "", fmt.Errorf("Grok 图片编辑只支持 1 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
+	// 官方支持单图 image_url（SDK 风格）与多图 images（≤3，风格融合/多图编辑）。
+	// 单图必须用 image_url 字符串：OSS 签名 URL 常带 attachment 强制下载头，
+	// 用 image:{url,type} 会被上游 400，image_url 字符串可过。
+	if len(input.ReferenceImages) > 3 {
+		return grokImageRequest{}, "", fmt.Errorf("Grok 图片编辑最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
 	}
-	imageURL, err := grokImageInputURL(input.ReferenceImages[0])
-	if err != nil {
-		return grokImageRequest{}, "", err
+	images := make([]grokImageInput, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := grokImageInputURL(reference)
+		if err != nil {
+			return grokImageRequest{}, "", err
+		}
+		images = append(images, grokImageInput{URL: imageURL, Type: "image_url"})
 	}
-	body.Image = &grokImageInput{URL: imageURL}
+	if len(images) == 1 {
+		body.ImageURL = images[0].URL
+	} else {
+		body.Images = images
+	}
 	return body, "/images/edits", nil
 }
 
@@ -831,6 +856,69 @@ func grokImageInputURL(media providerMedia) (string, error) {
 		return strings.TrimSpace(media.URL), nil
 	}
 	return openAIImageInputURL(media)
+}
+
+// runXAIImageTask 对接 xAI 官方图片接口（/images/generations / /images/edits）。
+// 与 grokImageTask 不同：只发 xAI 认的字段，固定 response_format=b64_json 避免二次下载和同源鉴权；
+// 不发 output_format/quality/background 等 xAI 未声明、聚合网关会 422 的字段。
+func runXAIImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if input.Mask != nil {
+		return nil, errors.New("xAI 官方图片协议不支持蒙版编辑，请移除蒙版后重试")
+	}
+	body, err := xaiImageBody(input)
+	if err != nil {
+		return nil, err
+	}
+	var payload imageResponse
+	if err := postJSON(ctx, input.Config, body.path, body.fields, &payload); err != nil {
+		return nil, err
+	}
+	images, err := imageDataURLs(payload)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{"mode": "image", "images": images}, nil
+}
+
+// xaiImageBodyFields 让 path 与字段集同时返回，保证调用点用同一条分支决定 generations/edits。
+type xaiImageBodyFields struct {
+	path   string
+	fields map[string]interface{}
+}
+
+func xaiImageBody(input canvasGenerationInput) (xaiImageBodyFields, error) {
+	fields := map[string]interface{}{
+		"model":           input.Config.Model,
+		"prompt":          withSystemPrompt(input.Config, input.Prompt),
+		"n":               1,
+		"response_format": "b64_json",
+	}
+	if key, value := imageSizeParameter(input.ImageCapability, input.Config.Size); value != "" {
+		fields[key] = value
+	}
+	if len(input.ReferenceImages) == 0 {
+		return xaiImageBodyFields{path: "/images/generations", fields: fields}, nil
+	}
+	// 官方支持单图 image_url（SDK 风格字符串）与多图 images（≤3）。
+	// 单图不走 image:{url,type}：实测 OSS 签名 URL（Content-Disposition:attachment）
+	// 用对象形态会被 xAI 400，改 image_url 字符串后同样 URL 可成功。
+	if len(input.ReferenceImages) > 3 {
+		return xaiImageBodyFields{}, fmt.Errorf("xAI 官方图片最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
+	}
+	images := make([]map[string]string, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := grokImageInputURL(reference)
+		if err != nil {
+			return xaiImageBodyFields{}, err
+		}
+		images = append(images, map[string]string{"url": imageURL, "type": "image_url"})
+	}
+	if len(images) == 1 {
+		fields["image_url"] = images[0]["url"]
+	} else {
+		fields["images"] = images
+	}
+	return xaiImageBodyFields{path: "/images/edits", fields: fields}, nil
 }
 
 const (
@@ -1418,7 +1506,7 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -2028,7 +2116,7 @@ func runNewAPIChannel1VideoTask(ctx context.Context, input canvasGenerationInput
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -2149,7 +2237,7 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	}
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true},
-		"image": {"openai-image": true, "grok-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
+		"image": {"openai-image": true, "xai-image": true, "grok-image": true, "volcengine-ark-image": true, "volcengine-jimeng-image": true},
 		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "volcengine-ark-video": true, "volcengine-jimeng-video": true, "gemini-veo": true, "novita-video": true},
 		"audio": {"openai-audio": true, "async-audio": true},
 	}
@@ -2210,30 +2298,35 @@ func xaiVideoRequestBody(input canvasGenerationInput) (xaiVideoRequest, error) {
 	if !shouldSendNewAPIVideoImages(input) || len(input.ReferenceImages) == 0 {
 		return body, nil
 	}
+	// 设置了画布首帧（videoStartFrameNodeId）时按 image-to-video 只传 image，并校验参考图一致性；
+	// 未设置首帧时按语义参考：单图走首帧模式 image:{url,type}，多图走 reference_image_urls，
+	// 两种字段语义不同（官方文档 3.3 节），混用会导致参考图被上游忽略。
 	startFrameID := metadataString(input.Metadata, "videoStartFrameNodeId")
-	if startFrameID == "" {
-		// 未设置首帧：所有参考图作为 R2V 参考，不受单张起始图限制。
-		for index := range input.ReferenceImages {
-			imageURL, err := openAIImageInputURL(input.ReferenceImages[index])
-			if err != nil {
-				return xaiVideoRequest{}, err
-			}
-			body.ReferenceImages = append(body.ReferenceImages, xaiVideoImage{URL: imageURL})
+	if startFrameID != "" {
+		if len(input.ReferenceImages) > 1 {
+			return xaiVideoRequest{}, fmt.Errorf("xAI 设置首帧后只支持 1 张起始图，当前连接了 %d 张", len(input.ReferenceImages))
 		}
+		if input.ReferenceImages[0].ID != startFrameID {
+			return xaiVideoRequest{}, errors.New("已配置的首帧参考图未包含在视频请求中")
+		}
+	}
+	if len(input.ReferenceImages) == 1 {
+		imageURL, err := openAIImageInputURL(input.ReferenceImages[0])
+		if err != nil {
+			return xaiVideoRequest{}, err
+		}
+		body.Image = &xaiVideoImage{URL: imageURL, Type: "image_url"}
 		return body, nil
 	}
-	// 设置了首帧：xAI 不允许 image 与 reference_images 同时出现，只把首帧作为起始图。
-	if len(input.ReferenceImages) > 1 {
-		return xaiVideoRequest{}, fmt.Errorf("xAI 设置首帧后只支持 1 张起始图，当前连接了 %d 张", len(input.ReferenceImages))
+	references := make([]string, 0, len(input.ReferenceImages))
+	for _, reference := range input.ReferenceImages {
+		imageURL, err := openAIImageInputURL(reference)
+		if err != nil {
+			return xaiVideoRequest{}, err
+		}
+		references = append(references, imageURL)
 	}
-	if input.ReferenceImages[0].ID != startFrameID {
-		return xaiVideoRequest{}, errors.New("已配置的首帧参考图未包含在视频请求中")
-	}
-	imageURL, err := openAIImageInputURL(input.ReferenceImages[0])
-	if err != nil {
-		return xaiVideoRequest{}, err
-	}
-	body.Image = &xaiVideoImage{URL: imageURL}
+	body.ReferenceImageURLs = references
 	return body, nil
 }
 
@@ -2267,7 +2360,7 @@ func runSeedanceVideosTask(ctx context.Context, input canvasGenerationInput) (ma
 	}
 	for deadline := providerPollingDeadline(ctx); time.Now().Before(deadline); {
 		var state map[string]interface{}
-		if err := getJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
+		if err := pollVideoJSON(ctx, input.Config, "/videos/"+id, &state); err != nil {
 			return nil, err
 		}
 		if data, ok := state["data"].(map[string]interface{}); ok {
@@ -2570,6 +2663,48 @@ func getJSON(ctx context.Context, config providerConfig, path string, target int
 	req.Header.Set("Authorization", "Bearer "+config.APIKey)
 	ApplyOutboundHeaders(req, config.Headers)
 	return doJSON(req, target)
+}
+
+// 轮询视频状态时，聚合网关、反代或本地代理（TUN 模式）偶发掐断 TCP 连接，
+// 单次失败就放弃会浪费上游已受理的生成任务。这里对这类瞬态网络错误重试。
+func pollVideoJSON(ctx context.Context, config providerConfig, path string, target interface{}) error {
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt += 1 {
+		err := getJSON(ctx, config, path, target)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientPollError(err) || attempt == maxAttempts {
+			return err
+		}
+		// 退避等待，但尊重取消信号；不占用轮询窗口太久。
+		if waitErr := sleepContext(ctx, time.Duration(500*attempt)*time.Millisecond); waitErr != nil {
+			return waitErr
+		}
+	}
+	return lastErr
+}
+
+// isTransientPollError 判断是否值得重试的瞬态网络错误：连接重置、超时、EOF、5xx、429。
+// 业务错误（4xx、任务失败等）不重试。
+func isTransientPollError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) {
+		return true
+	}
+	var httpErr providerHTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode == http.StatusRequestTimeout || httpErr.StatusCode == http.StatusTooManyRequests || httpErr.StatusCode >= http.StatusInternalServerError
+	}
+	return false
 }
 
 func postBinary(ctx context.Context, config providerConfig, path string, body interface{}) ([]byte, string, error) {
@@ -3213,3 +3348,5 @@ func seedanceErrorMessage(state map[string]interface{}) string {
 	}
 	return ""
 }
+
+
