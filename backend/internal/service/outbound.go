@@ -257,7 +257,17 @@ func newOutboundTransport(resolveHost func(context.Context, string) ([]net.IP, e
 			if err != nil {
 				return nil, err
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(addresses[0].String(), port))
+			// DNS 可能先返回 AAAA 再返回 A；只拨第一个地址会让 IPv6 路由不通的环境
+			// （如默认 NAS 出口）永远无法回退到 IPv4，因此按解析顺序逐个尝试。
+			var lastErr error
+			for _, ip := range addresses {
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				lastErr = dialErr
+			}
+			return nil, lastErr
 		},
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
