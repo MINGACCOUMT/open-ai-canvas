@@ -369,8 +369,9 @@ func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
 	}
 }
 
-// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image_url 字符串、多图走 images 数组。
+// TestXAIImageBodyUsesReferenceImageShape 验证单图走 image_url 字符串、多图走 prompt:{text,images} 对象。
 // 单图不用 image:{url,type}：OSS 签名 URL 带 attachment 时该形态会被上游 400。
+// 多图不在顶层发 images 数组：官方 HTTP 合同把 SDK 的 images 编码为 prompt 对象，顶层数组会被 400。
 func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
 	single, err := xaiImageBody(canvasGenerationInput{
 		Config:          providerConfig{Model: "grok-imagine-image", InterfaceType: "xai-image"},
@@ -406,9 +407,25 @@ func TestXAIImageBodyUsesReferenceImageShape(t *testing.T) {
 	if multi.path != "/images/edits" {
 		t.Fatalf("multi path = %q", multi.path)
 	}
-	images, _ := multi.fields["images"].([]map[string]string)
-	if len(images) != 2 || images[0]["type"] != "image_url" {
-		t.Fatalf("images = %#v", multi.fields["images"])
+	if _, ok := multi.fields["prompt"].(string); !ok {
+		t.Fatalf("prompt = %#v, want string", multi.fields["prompt"])
+	}
+	images, ok := multi.fields["images"].([]map[string]string)
+	if !ok || len(images) != 2 {
+		t.Fatalf("images = %#v, want [{type,url} x2]", multi.fields["images"])
+	}
+	if images[0]["type"] != "image_url" || images[0]["url"] != "https://example.com/a.png" {
+		t.Fatalf("images[0] = %#v", images[0])
+	}
+	if multi.fields["aspect_ratio"] != "" && multi.fields["aspect_ratio"] != nil {
+		if _, ok := multi.fields["aspect_ratio"].(string); !ok {
+			t.Fatalf("aspect_ratio = %#v, want string", multi.fields["aspect_ratio"])
+		}
+	}
+	for _, forbidden := range []string{"n", "response_format", "size"} {
+		if _, ok := multi.fields[forbidden]; ok {
+			t.Fatalf("%s should be absent for multi-reference (official edits contract)", forbidden)
+		}
 	}
 	if _, ok := multi.fields["image"]; ok {
 		t.Fatalf("image should be absent for multi-reference")
@@ -1506,5 +1523,22 @@ func TestRunNovitaVideoTaskReturnsFailureReason(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "content violates policy") {
 		t.Fatalf("runVideoTask() error = %v, want reason in message", err)
+	}
+}
+
+// 多图编辑的 aspect_ratio 依赖像素预设反查，锁定常见比例避免退化成非标 GCD 比。
+func TestStandardImageAspectRatioRestoresPresets(t *testing.T) {
+	cases := map[string]string{
+		"1824x1024": "16:9",
+		"1024x1024": "1:1",
+		"1024x1824": "9:16",
+		"16:9":      "16:9",
+		"1000x500":  "2:1",
+		"":          "",
+	}
+	for input, want := range cases {
+		if got := standardImageAspectRatio(input); got != want {
+			t.Fatalf("standardImageAspectRatio(%q) = %q, want %q", input, got, want)
+		}
 	}
 }

@@ -229,7 +229,7 @@ print(response.url)
 | 图生视频（首帧） | `image: {url, type:"image_url"}` | `image_url=` | 公网 URL 或 base64 data URI |
 | 视频多图语义参考 | `reference_image_urls: [url,...]` | — | 公网 URL 数组 |
 | 图像编辑（单图） | `image: {url, type:"image_url"}` | `image_url=` | 公网 URL 或 base64 data URI |
-| 图像编辑（多图） | `images: [{url,type},...]` | `prompt.images` | 最多 **3 张** |
+| 图像编辑（多图） | `images: [{type:"image_url",url},...]` + `aspect_ratio` | 同 REST（`prompt` 保持字符串） | 最多 **3 张**；实测多发 `n`/`response_format`/`size` 会被聚合网关上游 400 |
 
 ### 参考图可用形式
 - ✅ 公网 http(s) URL（推荐，xAI 自己去下载）

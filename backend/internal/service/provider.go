@@ -905,20 +905,54 @@ func xaiImageBody(input canvasGenerationInput) (xaiImageBodyFields, error) {
 	if len(input.ReferenceImages) > 3 {
 		return xaiImageBodyFields{}, fmt.Errorf("xAI 官方图片最多支持 3 张参考图，当前连接了 %d 张", len(input.ReferenceImages))
 	}
-	images := make([]map[string]string, 0, len(input.ReferenceImages))
+	urls := make([]string, 0, len(input.ReferenceImages))
 	for _, reference := range input.ReferenceImages {
 		imageURL, err := grokImageInputURL(reference)
 		if err != nil {
 			return xaiImageBodyFields{}, err
 		}
-		images = append(images, map[string]string{"url": imageURL, "type": "image_url"})
+		urls = append(urls, imageURL)
 	}
-	if len(images) == 1 {
-		fields["image_url"] = images[0]["url"]
+	if len(urls) == 1 {
+		fields["image_url"] = urls[0]
 	} else {
-		fields["images"] = images
+		// 官方多图合同（docs.x.ai multi-image-editing curl）：prompt 保持字符串、
+		// 顶层 images:[{type:"image_url",url}]、尺寸用 aspect_ratio；
+		// 实测多发 n/response_format/size 会被聚合网关的 xAI 上游 400 拒收。
+		imagesPayload := make([]map[string]string, 0, len(urls))
+		for _, imageURL := range urls {
+			imagesPayload = append(imagesPayload, map[string]string{"type": "image_url", "url": imageURL})
+		}
+		fields["images"] = imagesPayload
+		delete(fields, "n")
+		delete(fields, "response_format")
+		delete(fields, "size")
+		delete(fields, "aspect_ratio")
+		if ratio := standardImageAspectRatio(input.Config.Size); ratio != "" {
+			fields["aspect_ratio"] = ratio
+		}
 	}
 	return xaiImageBodyFields{path: "/images/edits", fields: fields}, nil
+}
+
+// standardImageAspectRatio 把渠道像素尺寸还原成 xAI 多图编辑认的标准比例；
+// 已是比例的透传，命不中预设再退化到 GCD 最简比。
+func standardImageAspectRatio(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, ":") {
+		return value
+	}
+	presets := map[string]string{
+		"1024x1024": "1:1", "1536x1024": "3:2", "1024x1536": "2:3",
+		"1360x1024": "4:3", "1024x1360": "3:4", "1824x1024": "16:9", "1024x1824": "9:16",
+	}
+	if ratio, ok := presets[value]; ok {
+		return ratio
+	}
+	return normalizeImageAspectRatio(value)
 }
 
 const (
