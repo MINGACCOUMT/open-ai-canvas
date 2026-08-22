@@ -123,6 +123,7 @@ async function prepareBackendMediaReference(media: ReferenceVideo | ReferenceAud
 }
 
 async function prepareBackendImageReference(image: ReferenceImage) {
+    image = await ensureUpstreamCompatibleImageReference(image);
     if (resourceIdFromStorageKey(image.storageKey)) return backendImageReference(image, { storageKey: image.storageKey });
     const sourceUrl = image.url || image.dataUrl;
     if (/^https?:\/\//i.test(sourceUrl)) return backendImageReference(image, { url: sourceUrl });
@@ -133,6 +134,59 @@ async function prepareBackendImageReference(image: ReferenceImage) {
         return backendImageReference(image, { storageKey: resourceStorageKey(resource.id), type: resource.mimeType || image.type || blob.type });
     } catch (error) {
         throw new Error(error instanceof Error ? `参考图片上传失败：${error.message}` : "参考图片上传失败");
+    }
+}
+
+// AVIF 参考图在部分聚合渠道会被静默丢弃并返回与参考无关的模板图（实测 grok-imagine 渠道），
+// 浏览器端统一转 JPEG 再交给后端，规避各渠道图片解码差异；后端标准库不支持 AVIF，只能在前端转。
+async function ensureUpstreamCompatibleImageReference(image: ReferenceImage): Promise<ReferenceImage> {
+    if (!isAvifReference(image)) return image;
+    const blob = await resolveReferenceImageBlob(image);
+    if (!blob) throw new Error("AVIF 参考图读取失败，请重新上传后再生成");
+    try {
+        const jpegBlob = await convertImageBlobToJpeg(blob);
+        const fileName = `${(image.name || "参考图").replace(/\.[^.]+$/, "")}.jpg`;
+        const resource = await uploadResourceFile(jpegBlob, "image", { fileName, width: image.width, height: image.height });
+        return backendImageReference(image, { storageKey: resourceStorageKey(resource.id), type: "image/jpeg" });
+    } catch (error) {
+        if (error instanceof Error && error.message.includes("参考图片上传失败")) throw error;
+        throw new Error(error instanceof Error ? `AVIF 参考图转码失败：${error.message}` : "AVIF 参考图转码失败");
+    }
+}
+
+function isAvifReference(image: ReferenceImage) {
+    if ((image.type || "").toLowerCase() === "image/avif") return true;
+    return [image.url, image.dataUrl, image.storageKey].some((value) => /\.avif($|[?#])/i.test(value || ""));
+}
+
+async function resolveReferenceImageBlob(image: ReferenceImage): Promise<Blob | null> {
+    if (image.storageKey) {
+        const cached = await getImageBlob(image.storageKey);
+        if (cached) return cached;
+    }
+    const sourceUrl = image.url || image.dataUrl;
+    if (!sourceUrl) return null;
+    try {
+        return await (await fetch(sourceUrl)).blob();
+    } catch {
+        return null;
+    }
+}
+
+async function convertImageBlobToJpeg(blob: Blob): Promise<Blob> {
+    const bitmap = await createImageBitmap(blob);
+    try {
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("无法创建画布");
+        context.drawImage(bitmap, 0, 0);
+        const jpeg = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+        if (!jpeg) throw new Error("JPEG 编码失败");
+        return jpeg;
+    } finally {
+        bitmap.close();
     }
 }
 
