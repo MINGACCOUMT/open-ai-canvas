@@ -1938,7 +1938,7 @@ func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("xaiVideoRequestBody() error = %v", err)
 	}
-	if body.Duration != 20 || body.AspectRatio != "9:16" || body.Resolution != "2k" {
+	if body.Duration != 20 || body.AspectRatio != "9:16" || body.Resolution != "1080p" {
 		t.Fatalf("xAI settings = %#v", body)
 	}
 	if body.Image == nil || body.Image.URL != testReferenceImageDataURL {

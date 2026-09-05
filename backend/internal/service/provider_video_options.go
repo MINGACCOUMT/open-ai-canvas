@@ -214,14 +214,16 @@ func normalizeXAIVideoDuration(value string) int {
 	return duration
 }
 
-// xAI 视频接口的 resolution 枚举只有 1k/2k（实测发 720/720p/1080p 会被上游
-// serde 直接拒收：unknown variant, expected `1k` or `2k`），必须在这里收敛。
+// xAI 视频接口的 resolution 枚举是 480p/720p/1080p（实测 1k/2k 会被拒收：
+// unknown variant, expected one of `480p`,`720p`,`1080p`），必须在这里收敛并夹取。
 func normalizeXAIVideoResolution(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "480", "480p", "low":
+		return "480p"
 	case "1080", "1080p", "1440", "1440p", "2k", "2160", "2160p", "4k", "high":
-		return "2k"
+		return "1080p"
 	default:
-		return "1k"
+		return "720p"
 	}
 }
 

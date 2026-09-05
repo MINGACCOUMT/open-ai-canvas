@@ -2561,6 +2561,18 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 			resolution = declared
 		}
 	}
+	// xai-video 插件协议把 request.resolution 原样透传给上游，而视频枚举只有
+	// 480p/720p/1080p；720/2k 等档位必须在进入插件模板前收敛，否则上游 serde 拒收。
+	if input.Config.InterfaceType == string(model.ChannelInterfaceXAIVideo) {
+		resolution = normalizeXAIVideoResolution(resolution)
+	}
+	imageQuality := strings.TrimSpace(input.Config.Quality)
+	// xai/grok 图片插件把 request.resolution/quality 原样透传为 resolution，
+	// 而图片枚举只有 1k/2k；未知档位归一为空让模板省略字段，由上游取默认。
+	if input.Mode == "image" && (input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) || input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage)) {
+		resolution = normalizeGrokImageResolution(resolution)
+		imageQuality = normalizeGrokImageResolution(imageQuality)
+	}
 	request := protocol.GenerationRequest{
 		Capability:    protocol.Capability(input.Mode),
 		Model:         input.Config.Model,
@@ -2571,7 +2583,7 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 		Audios:        protocolMediaReferences(input.ReferenceAudios, "audio"),
 		AspectRatio:   input.Config.Size,
 		Resolution:    resolution,
-		Quality:       input.Config.Quality,
+		Quality:       imageQuality,
 		GenerateAudio: parseBool(input.Config.VideoGenerateAudio, false),
 		Watermark:     parseBool(input.Config.VideoWatermark, false),
 		Operation:     firstNonEmpty(metadataString(input.Metadata, "videoEditOperation"), metadataString(input.Metadata, "videoOperation")),
@@ -3229,6 +3241,11 @@ func protocolMediaBytes(ctx context.Context, config providerConfig, reference pr
 	if value == "" {
 		return nil, "", errors.New("声明式协议媒体结果地址为空")
 	}
+	// 聚合网关可能返回相对路径（如 /v1/videos/{id}/content），必须基于上游
+	// BaseURL 解析成绝对地址，否则外链下载的 SSRF 校验会报「外部服务地址无效」。
+	if strings.HasPrefix(value, "/") {
+		value = resolveProviderRelativeMediaURL(config.BaseURL, value)
+	}
 	var data []byte
 	var mimeType string
 	var err error
@@ -3247,8 +3264,21 @@ func protocolMediaBytes(ctx context.Context, config providerConfig, reference pr
 	return nil, "", fmt.Errorf("声明式协议媒体结果下载失败：%w", err)
 }
 
-func retryableProtocolMediaDownload(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+// resolveProviderRelativeMediaURL 把上游返回的相对媒体路径拼到渠道 BaseURL 上；
+// BaseURL 非法或已是绝对地址时原样返回。
+func resolveProviderRelativeMediaURL(baseURL, value string) string {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return value
+	}
+	ref, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	return base.ResolveReference(ref).String()
+}
+
+func retryableProtocolMediaDownload(err error) bool {	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	var networkError net.Error

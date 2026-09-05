@@ -378,14 +378,16 @@ func newAPIChannel1Adapter() Adapter {
 	})
 }
 
-// xAI 视频接口的 resolution 枚举只有 1k/2k；原始档位（720/1080p/…）必须收敛，
-// 否则上游 serde 拒收：unknown variant, expected `1k` or `2k`。
+// xAI 视频接口的 resolution 枚举是 480p/720p/1080p；原始档位（720/2k/…）必须收敛，
+// 否则上游 serde 拒收：unknown variant, expected one of `480p`,`720p`,`1080p`。
 func xaiVideoResolutionTier(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "480", "480p", "low":
+		return "480p"
 	case "1080", "1080p", "1440", "1440p", "2k", "2160", "2160p", "4k", "high":
-		return "2k"
+		return "1080p"
 	default:
-		return "1k"
+		return "720p"
 	}
 }
 
