@@ -1,5 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
+# ⚠️ 已废弃（v1.2.6 合并后）：本文件的构建上下文只有 backend/，带不上仓库根的
+# plugin-packages/，而后端启动强依赖 /app/plugin-packages，用本文件构建的镜像会启动即退。
+# 请改用仓库根的 Dockerfile.acr（ACR「Dockerfile 路径」填 Dockerfile.acr）。
+# 保留本文件仅为了旧 tag 的追溯。
+
 # 此 Dockerfile 专为阿里云 ACR 个人版构建：ACR 的「Dockerfile 路径」字段同时充当构建上下文，
 # 当填 backend/ 时 context 即为 backend/，因此 COPY 路径不带 backend/ 前缀。
 # 本地 / docker compose / GitHub Actions 仍使用 backend/Dockerfile（context 为仓库根）。
