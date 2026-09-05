@@ -4510,8 +4510,16 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	return validateGenerationInterfaceWithRegistry(protocol.Builtins(), mode, interfaceType)
 }
 
+// (s *Service) validateGenerationInterface 校验协议是否可用。插件 registry 只包含
+// plugin-packages 里的声明式协议；执行引擎在 provider.go legacy 分支的自有协议
+// （如 xai-image，走 runXAIImageTask）不在其中，回退查 Builtins 放行——Builtins
+// 的 Execution 非 declarative，不会被声明式调度劫持。
 func (s *Service) validateGenerationInterface(mode string, interfaceType string) error {
-	return validateGenerationInterfaceWithRegistry(s.protocolRegistry(), mode, interfaceType)
+	err := validateGenerationInterfaceWithRegistry(s.protocolRegistry(), mode, interfaceType)
+	if err == nil {
+		return nil
+	}
+	return validateGenerationInterfaceWithRegistry(protocol.Builtins(), mode, interfaceType)
 }
 
 func validateGenerationInterfaceWithRegistry(registry *protocol.Registry, mode string, interfaceType string) error {
