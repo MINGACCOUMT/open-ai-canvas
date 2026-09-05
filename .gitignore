@@ -1,7 +1,19 @@
 .next/
 out/
 node_modules/
-docs/
+docs/*
+!docs/design/
+!docs/index.md
+!docs/adr/
+!docs/plans/
+# Keep the new plugin design spec versioned without unignoring generated docs.
+!docs/content/
+docs/content/*
+!docs/content/docs/
+docs/content/docs/*
+!docs/content/docs/plugins/
+docs/content/docs/plugins/*
+!docs/content/docs/plugins/ai-art-critique.mdx
 .env*
 !.env.example
 data/
@@ -11,6 +23,9 @@ coverage/
 dist/
 *.log
 *.tsbuildinfo
+/web/public/OpenAICanvas-ComfyBridge.exe
+/web/public/OpenAICanvas-ComfyBridge-linux-amd64
+/web/public/OpenAICanvas-ComfyBridge-linux-arm64
 *.db
 *.db-*
 *.sqlite
@@ -35,3 +50,6 @@ assets/prototypes/.*.drawio.bkp
 .vscode/
 .zcode/
 camera_language_guide.md
+.superdesign
+.playwright-cli/
+/project-memory/

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"infinite-canvas/backend/internal/model"
 
@@ -21,12 +22,30 @@ type CanvasProjectsSyncRequest struct {
 
 type UserDataSummary struct {
 	ID        string    `json:"id"`
+	FolderID  string    `json:"folderId,omitempty"`
 	Kind      string    `json:"kind,omitempty"`
 	Category  string    `json:"category,omitempty"`
 	Status    string    `json:"status,omitempty"`
 	Title     string    `json:"title"`
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+type UserDataSnapshot struct {
+	Assets   []json.RawMessage `json:"assets"`
+	Projects []json.RawMessage `json:"projects"`
+}
+
+func (s *Service) UserDataSnapshot(userID string) (UserDataSnapshot, error) {
+	assets, err := s.UserAssets(userID)
+	if err != nil {
+		return UserDataSnapshot{}, err
+	}
+	projects, err := s.UserCanvasProjects(userID)
+	if err != nil {
+		return UserDataSnapshot{}, err
+	}
+	return UserDataSnapshot{Assets: assets, Projects: projects}, nil
 }
 
 func (s *Service) UserAssetSummaries(userID string) ([]UserDataSummary, error) {
@@ -36,7 +55,7 @@ func (s *Service) UserAssetSummaries(userID string) ([]UserDataSummary, error) {
 	}
 	result := make([]UserDataSummary, 0, len(assets))
 	for _, asset := range assets {
-		result = append(result, UserDataSummary{ID: asset.ID, Kind: asset.Kind, Category: string(asset.Category), Status: string(asset.Status), Title: asset.Title, CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt})
+		result = append(result, UserDataSummary{ID: asset.ID, FolderID: asset.FolderID, Kind: asset.Kind, Category: string(asset.Category), Status: string(asset.Status), Title: asset.Title, CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt})
 	}
 	return result, nil
 }
@@ -60,9 +79,22 @@ func (s *Service) UpsertUserAsset(userID string, raw json.RawMessage) (UserDataS
 	}
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
+	if asset.FolderID != "" {
+		if _, err := s.repo.AssetFolderForUser(userID, asset.FolderID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return UserDataSummary{}, BadAuthRequest("素材分类不存在")
+			}
+			return UserDataSummary{}, err
+		}
+	}
 	existing, existingErr := s.repo.AssetForUser(userID, asset.ID)
 	if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 		return UserDataSummary{}, existingErr
+	}
+	if existing != nil && existing.PayloadJSON != asset.PayloadJSON {
+		if err := s.validateAssetCanvasReferences(userID, asset); err != nil {
+			return UserDataSummary{}, err
+		}
 	}
 	existingBytes := int64(0)
 	if existing != nil {
@@ -81,21 +113,13 @@ func (s *Service) UpsertUserAsset(userID string, raw json.RawMessage) (UserDataS
 	if existingErr != nil {
 		s.recordActivity(userID, "asset", 1)
 	}
-	return UserDataSummary{ID: asset.ID, Kind: asset.Kind, Category: string(asset.Category), Status: string(asset.Status), Title: asset.Title, CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt}, nil
+	return UserDataSummary{ID: asset.ID, FolderID: asset.FolderID, Kind: asset.Kind, Category: string(asset.Category), Status: string(asset.Status), Title: asset.Title, CreatedAt: asset.CreatedAt, UpdatedAt: asset.UpdatedAt}, nil
 }
 
 func (s *Service) DeleteUserAsset(userID string, id string) error {
-	if _, err := s.repo.AssetForUser(userID, id); err != nil {
-		return err
-	}
-	references, err := s.repo.AssetReferenceCount(id)
-	if err != nil {
-		return err
-	}
-	if references > 0 {
-		return BadAuthRequest("素材仍被项目或镜头引用，请先解除引用")
-	}
-	return s.repo.DeleteAsset(userID, id)
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+	return s.deleteUserAssetWithResources(userID, id)
 }
 
 func (s *Service) UserAssets(userID string) ([]json.RawMessage, error) {
@@ -129,6 +153,9 @@ func (s *Service) ReplaceUserAssets(userID string, req AssetsSyncRequest) ([]jso
 	}
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
+	if err := s.validateAssetReplacementCanvasReferences(userID, assets); err != nil {
+		return nil, err
+	}
 	usage, err := s.repo.UserStorageUsage(userID)
 	if err != nil {
 		return nil, err
@@ -190,6 +217,9 @@ func (s *Service) UpsertUserCanvasProject(userID string, raw json.RawMessage) (U
 	}
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
+	if err := s.validateCanvasMediaAssets(userID, raw); err != nil {
+		return UserDataSummary{}, err
+	}
 	existing, existingErr := s.repo.CanvasProjectForUser(userID, project.ID)
 	if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 		return UserDataSummary{}, existingErr
@@ -215,9 +245,6 @@ func (s *Service) UpsertUserCanvasProject(userID string, raw json.RawMessage) (U
 }
 
 func (s *Service) DeleteUserCanvasProject(userID string, id string) error {
-	if err := s.repo.DeleteCanvasShare(userID, id); err != nil {
-		return err
-	}
 	return s.repo.DeleteCanvasProject(userID, id)
 }
 
@@ -238,6 +265,11 @@ func (s *Service) ReplaceUserCanvasProjects(userID string, req CanvasProjectsSyn
 	}
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
+	for _, raw := range req.Projects {
+		if err := s.validateCanvasMediaAssets(userID, raw); err != nil {
+			return nil, err
+		}
+	}
 	usage, err := s.repo.UserStorageUsage(userID)
 	if err != nil {
 		return nil, err
@@ -260,6 +292,7 @@ func assetFromJSON(userID string, raw json.RawMessage) (model.Asset, error) {
 	}
 	var payload struct {
 		ID               string `json:"id"`
+		FolderID         string `json:"folderId"`
 		Kind             string `json:"kind"`
 		Category         string `json:"category"`
 		Status           string `json:"status"`
@@ -278,10 +311,14 @@ func assetFromJSON(userID string, raw json.RawMessage) (model.Asset, error) {
 	if id == "" {
 		id = newID()
 	}
-	category := model.AssetCategory(strings.TrimSpace(payload.Category))
-	if category == "" {
-		category = model.AssetCategoryOther
+	if utf8.RuneCountInString(id) > model.AssetIDMaxLength {
+		return model.Asset{}, BadAuthRequest("素材 ID 不能超过 80 个字符")
 	}
+	primaryVersionID := strings.TrimSpace(payload.PrimaryVersionID)
+	if utf8.RuneCountInString(primaryVersionID) > 36 {
+		return model.Asset{}, BadAuthRequest("素材主版本 ID 不能超过 36 个字符")
+	}
+	category := model.NormalizeAssetCategory(model.AssetCategory(payload.Category), payload.Kind)
 	status := model.AssetVersionStatus(strings.TrimSpace(payload.Status))
 	if status == "" {
 		status = model.AssetVersionStatusConfirmed
@@ -289,10 +326,11 @@ func assetFromJSON(userID string, raw json.RawMessage) (model.Asset, error) {
 	return model.Asset{
 		ID:               id,
 		UserID:           userID,
+		FolderID:         strings.TrimSpace(payload.FolderID),
 		Kind:             strings.TrimSpace(payload.Kind),
 		Category:         category,
 		Status:           status,
-		PrimaryVersionID: strings.TrimSpace(payload.PrimaryVersionID),
+		PrimaryVersionID: primaryVersionID,
 		Title:            strings.TrimSpace(payload.Title),
 		PayloadJSON:      string(raw),
 		CreatedAt:        createdAt,

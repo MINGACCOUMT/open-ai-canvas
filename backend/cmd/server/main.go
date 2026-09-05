@@ -1,26 +1,41 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"infinite-canvas/backend/internal/database"
 	"infinite-canvas/backend/internal/handler"
 	"infinite-canvas/backend/internal/repository"
 	"infinite-canvas/backend/internal/service"
+	"infinite-canvas/backend/internal/updaterclient"
 
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run(ctx context.Context) error {
 	dataDir := env("CANVAS_BACKEND_DATA_DIR", "data")
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	db, err := database.Open(database.Config{
 		Driver:  env("CANVAS_DATABASE_DRIVER", "sqlite"),
@@ -28,74 +43,157 @@ func main() {
 		DataDir: dataDir,
 	})
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := database.ConfigurePool(db); err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if err := database.MigrateSchema(db); err != nil {
-		log.Fatal(err)
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+	defer sqlDB.Close()
+	autoMigrate, err := envBool("CANVAS_AUTO_MIGRATE", true)
+	if err != nil {
+		return err
+	}
+	if autoMigrate {
+		err = database.MigrateSchema(db)
+	} else {
+		err = database.RequireSchemaVersion(db)
+	}
+	if err != nil {
+		return err
 	}
 
 	repo := repository.New(db)
-	svc := service.New(repo, dataDir)
+	addr := env("CANVAS_BACKEND_ADDR", ":8080")
+	capabilities := service.RuntimeCapabilitiesForDeployment(addr, os.Getenv("CANVAS_DESKTOP_LOCAL_CHANNELS_ENABLED"))
+	svc := service.NewWithRuntimeCapabilities(repo, dataDir, capabilities)
+	if updaterToken := strings.TrimSpace(os.Getenv("CANVAS_UPDATER_TOKEN")); updaterToken != "" {
+		svc.ConfigureUpdateManager(updaterclient.New(env("CANVAS_UPDATER_SOCKET", "/run/open-ai-canvas-updater/updater.sock"), updaterToken))
+	}
+	defer svc.Close()
 	if err := svc.ValidateRuntime(); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := svc.EnsureSystemChannelModels(); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := svc.EnsureDefaultPromptTemplates(); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := svc.EnsureBuiltinProjectWorkflowTemplate(); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := svc.EnsureBuiltinSkills(); err != nil {
-		log.Fatal(err)
+		return err
+	}
+	if err := svc.EnsureSkillPackages(); err != nil {
+		return err
 	}
 	if summary, err := svc.MigrateLegacyStorage(); err != nil {
 		log.Printf("storage migration skipped after error: %v", err)
 	} else if summary.Backup != "" {
 		log.Printf("storage migration completed: tasks=%d assets=%d projects=%d backup=%s", summary.Tasks, summary.Assets, summary.Projects, summary.Backup)
 	}
-	svc.StartWorker()
-
 	r := gin.New()
 	r.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
 		return fmt.Sprintf("%s - [%s] \"%s %s\" %d %s %s\n", param.ClientIP, param.TimeStamp.Format(time.RFC3339), param.Method, redactCanvasSharePath(param.Path), param.StatusCode, param.Latency, param.ErrorMessage)
 	}), gin.Recovery())
-	r.Use(cors())
+	r.Use(handler.RequestCorrelationMiddleware())
+	corsMiddleware, err := cors()
+	if err != nil {
+		return err
+	}
+	r.Use(corsMiddleware)
 	handler.ConfigureRuntime(svc)
 	api := r.Group("/api")
-	api.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"code": 0, "data": gin.H{"status": "ok"}, "msg": "ok"})
-	})
+	status := newSystemStatus(db, svc)
+	registerSystemStatusRoutes(api, status)
 	handler.RegisterOAuthCallbackRoutes(r, svc)
 	handler.RegisterAuthRoutes(api, svc)
+	handler.RegisterAppearanceRoutes(api, svc)
 	handler.RegisterFeatureAvailabilityRoutes(api, svc)
+	handler.RegisterResponseInterceptionRoutes(api, svc)
 	handler.RegisterAdminRoutes(api, svc)
 	handler.RegisterAdminAnalyticsRoutes(api, svc)
+	handler.RegisterAdminStorageRoutes(api, svc)
+	handler.RegisterAdminUpdateRoutes(api, svc)
 	handler.RegisterAnnouncementRoutes(api, svc)
 	handler.RegisterFinanceRoutes(api, svc)
+	handler.RegisterPaymentRoutes(api, svc)
+	handler.RegisterLibTVRoutes(api, svc)
+	handler.RegisterTapNowRoutes(api, svc)
 	// 登录态模型目录代理：避免浏览器直连各上游时分别处理 CORS。
 	handler.RegisterChannelModelRoutes(api, svc)
+	handler.RegisterLogicalModelRoutes(api, svc)
+	handler.RegisterModelCatalogRoutes(api, svc)
 	handler.RegisterSystemProxyRoutes(api, svc)
 	handler.RegisterCustomRelayRoutes(api, svc)
 	handler.RegisterTaskRoutes(api, svc)
+	handler.RegisterComfyBridgeRoutes(api, svc)
+	handler.RegisterRunningHubRoutes(api, svc)
 	handler.RegisterSessionRoutes(api, svc)
 	handler.RegisterSkillRoutes(api, svc)
 	handler.RegisterUserDataRoutes(api, svc)
+	handler.RegisterChunkedUploadRoutes(api, svc)
+	handler.RegisterDiagnosticsRoutes(api, svc)
+	handler.RegisterPluginRoutes(api, svc)
 	projectAPI := api.Group("")
 	projectAPI.Use(handler.RequireFeature(svc, service.FeatureShortDrama))
 	handler.RegisterProjectRoutes(projectAPI, svc)
 	handler.RegisterCanvasShareRoutes(api, svc)
+	r.NoRoute(handler.SystemProxyNoRouteHandler(svc))
 
-	addr := env("CANVAS_BACKEND_ADDR", ":8080")
-	log.Printf("影策 backend listening on %s", addr)
-	if err := r.Run(addr); err != nil {
-		log.Fatal(err)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
+	workerTimeout, err := envDuration("CANVAS_SHUTDOWN_TIMEOUT", 10*time.Minute)
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
+	httpServer := &http.Server{Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	svc.StartWorker()
+	// 启动后回填存量视频的播放副本转码（幂等，无待处理项即退出）。
+	go svc.BackfillPlaybackTranscodes()
+	status.markStarted()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.Serve(listener) }()
+	log.Printf("backend listening on %s", addr)
+
+	var serveFailure error
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveFailure = fmt.Errorf("HTTP 服务异常退出：%w", err)
+		}
+	}
+
+	status.beginDrain()
+	var shutdownFailures []error
+	if serveFailure != nil {
+		shutdownFailures = append(shutdownFailures, serveFailure)
+	}
+	httpShutdownCtx, httpShutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer httpShutdownCancel()
+	if err := httpServer.Shutdown(httpShutdownCtx); err != nil {
+		_ = httpServer.Close()
+		shutdownFailures = append(shutdownFailures, fmt.Errorf("关闭 HTTP 服务：%w", err))
+	}
+	workerCtx, workerCancel := context.WithTimeout(context.Background(), workerTimeout)
+	defer workerCancel()
+	if err := svc.StopWorker(workerCtx); err != nil {
+		shutdownFailures = append(shutdownFailures, fmt.Errorf("等待后台任务退出：%w", err))
+	}
+	if err := errors.Join(shutdownFailures...); err != nil {
+		return err
+	}
+	log.Printf("backend stopped gracefully")
+	return nil
 }
 
 func redactCanvasSharePath(path string) string {
@@ -118,10 +216,47 @@ func env(key string, fallback string) string {
 	return value
 }
 
-func cors() gin.HandlerFunc {
+func envBool(key string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s 必须是 true 或 false", key)
+	}
+	return parsed, nil
+}
+
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return 0, fmt.Errorf("%s 必须是正数时长，例如 10m", key)
+	}
+	return parsed, nil
+}
+
+const corsAllowedHeaders = "Accept, Content-Type, Authorization, X-Requested-With, X-Canvas-Scene, X-Idempotency-Key, X-Canvas-Trace-ID, X-Canvas-Upstream-URL, X-Canvas-Upstream-Format, X-Canvas-Allow-Local-Channel, X-Canvas-Upstream-Base-URL"
+
+const corsAllowedMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+
+type corsPolicy struct {
+	origins  map[string]struct{}
+	allowAny bool
+}
+
+func cors() (gin.HandlerFunc, error) {
+	policy, err := parseCORSPolicy(os.Getenv("CANVAS_CORS_ORIGINS"))
+	if err != nil {
+		return nil, err
+	}
 	return func(c *gin.Context) {
 		origin := strings.TrimSpace(c.GetHeader("Origin"))
-		if origin != "" && !allowedOrigin(c, origin) {
+		if origin != "" && !allowedOriginWithPolicy(c, origin, policy) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": http.StatusForbidden, "data": nil, "msg": "不允许的跨域来源"})
 			return
 		}
@@ -130,20 +265,68 @@ func cors() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Vary", "Origin, Access-Control-Request-Method, Access-Control-Request-Headers")
 		}
-		c.Header("Access-Control-Allow-Headers", "Accept, Content-Type, Authorization, X-Requested-With, X-Canvas-Scene, X-Idempotency-Key, X-Canvas-Upstream-URL, X-Canvas-Upstream-Format")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", corsAllowedHeaders+", X-Canvas-Comfy-Bridge-Token, X-Canvas-Bridge-Token")
+		c.Header("Access-Control-Expose-Headers", "X-Request-ID, X-Canvas-Trace-ID, X-Diagnostic-Bundle-ID, X-Diagnostic-Schema-Version")
+		c.Header("Access-Control-Allow-Methods", corsAllowedMethods)
 		c.Header("Access-Control-Max-Age", "86400")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
 		}
 		c.Next()
-	}
+	}, nil
 }
 
 func allowedOrigin(c *gin.Context, origin string) bool {
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+	policy, err := parseCORSPolicy(os.Getenv("CANVAS_CORS_ORIGINS"))
+	if err != nil {
+		return false
+	}
+	return allowedOriginWithPolicy(c, origin, policy)
+}
+
+func parseCORSPolicy(raw string) (corsPolicy, error) {
+	policy := corsPolicy{origins: make(map[string]struct{})}
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if value == "*" {
+			policy.allowAny = true
+			continue
+		}
+		normalized, err := normalizeCORSOrigin(value)
+		if err != nil {
+			return corsPolicy{}, fmt.Errorf("CANVAS_CORS_ORIGINS contains invalid origin %q: %w", value, err)
+		}
+		policy.origins[normalized] = struct{}{}
+	}
+	return policy, nil
+}
+
+func normalizeCORSOrigin(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", fmt.Errorf("origin is empty")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", fmt.Errorf("origin must be an http or https origin")
+	}
+	if parsed.Path != "" && parsed.Path != "/" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("origin must not contain a path, query, or fragment")
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), nil
+}
+
+func allowedOriginWithPolicy(c *gin.Context, origin string, policy corsPolicy) bool {
+	normalizedOrigin, err := normalizeCORSOrigin(origin)
+	if err != nil {
+		return false
+	}
+	parsed, err := url.Parse(normalizedOrigin)
+	if err != nil {
 		return false
 	}
 	requestHost := c.Request.Host
@@ -153,13 +336,14 @@ func allowedOrigin(c *gin.Context, origin string) bool {
 	if strings.EqualFold(parsed.Host, strings.TrimSpace(requestHost)) {
 		return true
 	}
-	for _, allowed := range strings.Split(os.Getenv("CANVAS_CORS_ORIGINS"), ",") {
-		if strings.TrimSpace(allowed) == "*" {
-			return true
-		}
-		if strings.EqualFold(strings.TrimRight(strings.TrimSpace(allowed), "/"), strings.TrimRight(origin, "/")) {
-			return true
-		}
+	if policy.allowAny {
+		return true
+	}
+	if _, ok := policy.origins[normalizedOrigin]; ok {
+		return true
+	}
+	if len(policy.origins) > 0 {
+		return false
 	}
 	host := strings.ToLower(parsed.Hostname())
 	return (host == "localhost" || host == "127.0.0.1" || host == "::1") && (parsed.Scheme == "http" || parsed.Scheme == "https")

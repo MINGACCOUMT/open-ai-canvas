@@ -22,12 +22,17 @@ export function generationFailureMetadata(error: unknown, prompt: string): Gener
 }
 
 export function generationErrorMessage(error: unknown) {
+    const stableCode = generationErrorCode(error);
+    const stableMessage = stableCode ? DREAMINA_SUBMIT_ERROR_MESSAGES[stableCode] : undefined;
+    if (stableMessage) return stableMessage;
     const raw = rawGenerationError(error);
     if (isContentModerationError(raw)) return CONTENT_MODERATION_MESSAGE;
 
     const providerMessage = extractStructuredProviderMessage(raw) || extractWrappedProviderMessage(raw);
     const displayMessage = providerMessage || raw;
     if (isContentModerationError(displayMessage)) return CONTENT_MODERATION_MESSAGE;
+    const resourceStorageMessage = resourceStorageFailureMessage(raw) || resourceStorageFailureMessage(displayMessage);
+    if (resourceStorageMessage) return resourceStorageMessage;
     if (isNetworkFailure(displayMessage)) return NETWORK_ERROR_MESSAGE;
     if (!providerMessage) {
         if (hasHttpStatus(raw, 429)) return "服务当前繁忙，请稍后重试。";
@@ -36,6 +41,22 @@ export function generationErrorMessage(error: unknown) {
         if (hasHttpStatus(raw, 500, 502, 503, 504) || containsInfrastructureDetails(raw)) return NETWORK_ERROR_MESSAGE;
     }
     return displayMessage || DEFAULT_GENERATION_ERROR_MESSAGE;
+}
+
+export const DREAMINA_SUBMIT_ERROR_MESSAGES: Record<string, string> = {
+    dreamina_submit_spawn_failed: "无法启动官方即梦 CLI，任务尚未提交。",
+    dreamina_submit_exit_nonzero: "官方即梦 CLI 未接受本次提交，任务没有自动重试。",
+    dreamina_submit_timeout: "等待官方即梦 CLI 确认提交超时，为避免重复扣费，任务没有自动重试。",
+    dreamina_submit_receipt_missing: "官方即梦 CLI 未返回任务凭证，为避免重复扣费，任务没有自动重试。",
+    dreamina_submission_unknown: "提交结果待确认，为避免重复扣费未自动重试。",
+};
+
+export function generationErrorCode(error: unknown) {
+    if (error && typeof error === "object" && "code" in error && typeof (error as { code?: unknown }).code === "string") {
+        const code = (error as { code: string }).code;
+        if (/^(?:dreamina|local_generation|origin)_[a-z0-9_]{2,80}$/.test(code)) return code;
+    }
+    return undefined;
 }
 
 export function isContentModerationError(value: unknown) {
@@ -84,9 +105,7 @@ function extractWrappedProviderMessage(raw: string) {
     const requestFailure = raw.match(/^Request failed with status code \d{3}\s*[:：-]?\s*(.+)$/is);
     const wrapped = interfaceFailure?.[1] ?? requestFailure?.[1];
     if (!wrapped) return "";
-    const message = wrapped
-        .replace(/^\d{3}(?:\s+(?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error|Not Found|Unauthorized|Forbidden|Too Many Requests))?\s*[:：-]?\s*/i, "")
-        .trim();
+    const message = wrapped.replace(/^\d{3}(?:\s+(?:Bad Gateway|Service Unavailable|Gateway Timeout|Internal Server Error|Not Found|Unauthorized|Forbidden|Too Many Requests))?\s*[:：-]?\s*/i, "").trim();
     return message && !containsInfrastructureDetails(message) ? message : "";
 }
 
@@ -115,4 +134,13 @@ function hasHttpStatus(value: string, ...statuses: number[]) {
 
 function containsInfrastructureDetails(value: string) {
     return /(?:接口请求失败|Request failed with status code|https?:\/\/|\b(?:GET|POST|PUT|PATCH|DELETE)\s+["']?|Bad Gateway|Service Unavailable|Gateway Timeout|upstream_error)/i.test(value);
+}
+
+function resourceStorageFailureMessage(value: string) {
+    if (!value) return "";
+    if (/\bUserDisable\b/i.test(value)) return "对象存储账号已停用，请检查或更换对象存储配置。";
+    if (/(?:参考(?:图片|媒体)上传失败|OSS 上传失败|对象存储|腾讯云 COS|七牛云)/i.test(value)) {
+        return "参考素材上传到对象存储失败，请检查对象存储配置后重试。";
+    }
+    return "";
 }

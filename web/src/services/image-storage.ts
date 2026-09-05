@@ -3,7 +3,7 @@ import localforage from "localforage";
 import { nanoid } from "nanoid";
 import { readImageMeta } from "@/lib/image-utils";
 import { getActiveUserScope } from "@/lib/user-scope";
-import { importResourceFromUrl, isResourceUrl, resourceFileUrl, resourceIdFromStorageKey, resourceStorageKey, resolveResourceUrl, uploadResourceFile } from "@/services/api/resources";
+import { importResourceFromUrl, isResourceUrl, resourceFileUrl, resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
 import { cacheResourceObjectUrl, getCachedResourceBlob, getCachedResourceObjectUrl, primeResourceBlobCache } from "@/services/resource-blob-cache";
 
 export type UploadedImage = {
@@ -19,9 +19,12 @@ const store = localforage.createInstance({ name: "infinite-canvas", storeName: "
 const objectUrls = new Map<string, string>();
 
 export async function uploadImage(input: string | Blob): Promise<UploadedImage> {
+    // 同一个逻辑上传在直传失败后会退回 IndexedDB，并由云端数据同步再次提交。
+    // 提前生成本地 key，确保两条路径向后端发送相同的幂等标识。
+    const storageKey = `image:${getActiveUserScope()}:${nanoid()}`;
     if (typeof input === "string" && shouldImportRemoteImage(input)) {
         try {
-            const resource = await importResourceFromUrl(input, "image");
+            const resource = await importResourceFromUrl(input, "image", { idempotencyKey: storageKey });
             return {
                 url: resource.publicUrl || resourceFileUrl(resource.id),
                 storageKey: resourceStorageKey(resource.id),
@@ -38,7 +41,7 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     const previewUrl = URL.createObjectURL(blob);
     const meta = await readImageMeta(previewUrl);
     try {
-        const resource = await uploadResourceFile(blob, "image", { width: meta.width, height: meta.height, fileName: input instanceof File ? input.name : undefined });
+        const resource = await uploadResourceFile(blob, "image", { width: meta.width, height: meta.height, fileName: input instanceof File ? input.name : undefined, idempotencyKey: storageKey });
         await primeResourceBlobCache(resourceStorageKey(resource.id), blob).catch(() => "");
         URL.revokeObjectURL(previewUrl);
         return {
@@ -52,7 +55,6 @@ export async function uploadImage(input: string | Blob): Promise<UploadedImage> 
     } catch {
         // OSS is optional during local/self-hosted setup. Keep the existing local fallback.
     }
-    const storageKey = `image:${getActiveUserScope()}:${nanoid()}`;
     await store.setItem(storageKey, blob);
     const url = previewUrl;
     objectUrls.set(storageKey, url);
@@ -65,14 +67,15 @@ function shouldImportRemoteImage(input: string) {
 
 export async function resolveImageUrl(storageKey?: string, fallback = "", options?: { cacheMiss?: boolean }) {
     if (!storageKey) return fallback;
-    if (resourceIdFromStorageKey(storageKey)) {
+    const resourceId = resourceIdFromStorageKey(storageKey);
+    if (resourceId) {
         const cached = await getCachedResourceObjectUrl(storageKey).catch(() => "");
         if (cached) return cached;
         if (options?.cacheMiss) {
             const populated = await cacheResourceObjectUrl(storageKey).catch(() => "");
             if (populated) return populated;
         }
-        return resolveResourceUrl(storageKey, fallback);
+        return resourceFileUrl(resourceId);
     }
     const cached = objectUrls.get(storageKey);
     if (cached) return cached;
@@ -121,19 +124,19 @@ export async function deleteStoredImages(keys: Iterable<string>) {
     );
 }
 
-export async function cleanupUnusedImages(usedData: unknown) {
+export async function cleanupUnusedImages(usedData: unknown, scope = getActiveUserScope()) {
     const usedKeys = collectImageStorageKeys(usedData);
-    const currentPrefix = `image:${getActiveUserScope()}:`;
+    const currentPrefixes = [`image:${scope}:`, `generation-image:${scope}:`];
     const unused: string[] = [];
     await store.iterate((_value, key) => {
-        if (key.startsWith(currentPrefix) && !usedKeys.has(key)) unused.push(key);
+        if (currentPrefixes.some((prefix) => key.startsWith(prefix)) && !usedKeys.has(key)) unused.push(key);
     });
     await deleteStoredImages(unused);
 }
 
 export function collectImageStorageKeys(value: unknown, keys = new Set<string>()) {
     if (!value || typeof value !== "object") return keys;
-    if ("storageKey" in value && typeof value.storageKey === "string" && (value.storageKey.startsWith("image:") || resourceIdFromStorageKey(value.storageKey))) keys.add(value.storageKey);
+    if ("storageKey" in value && typeof value.storageKey === "string" && (value.storageKey.startsWith("image:") || value.storageKey.startsWith("generation-image:") || resourceIdFromStorageKey(value.storageKey))) keys.add(value.storageKey);
     Object.values(value).forEach((item) => (Array.isArray(item) ? item.forEach((child) => collectImageStorageKeys(child, keys)) : collectImageStorageKeys(item, keys)));
     return keys;
 }

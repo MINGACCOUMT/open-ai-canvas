@@ -1,6 +1,7 @@
 import { getDataUrlByteSize } from "@/lib/image-utils";
+import { canvasNodeVideoPreviewUrl } from "@/lib/canvas/canvas-media-preview";
 import type { Asset, AssetCategory, NewAsset } from "@/stores/use-asset-store";
-import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
+import { CanvasNodeType, type CanvasNodeData, type CanvasNodeTypeId } from "@/types/canvas";
 
 export type CanvasAssetSource = "canvas-generation" | "canvas-upload" | "canvas-manual";
 
@@ -24,7 +25,7 @@ export function canvasNodeToAsset(node: CanvasNodeData, options: CanvasNodeAsset
     };
     const base = {
         title,
-        coverUrl: node.type === CanvasNodeType.Image ? content : "",
+        coverUrl: node.type === CanvasNodeType.Image ? content : node.type === CanvasNodeType.Video ? canvasNodeVideoPreviewUrl(node) : "",
         tags: node.metadata?.assetTags || [],
         category: canvasNodeAssetCategory(node),
         status: "confirmed" as const,
@@ -60,6 +61,7 @@ export function canvasNodeToAsset(node: CanvasNodeData, options: CanvasNodeAsset
                 width: node.metadata?.naturalWidth || node.width,
                 height: node.metadata?.naturalHeight || node.height,
                 durationMs: node.metadata?.durationMs,
+                hasAudio: node.metadata?.hasAudio,
                 bytes: node.metadata?.bytes || 0,
                 mimeType: node.metadata?.mimeType || "video/mp4",
             },
@@ -114,17 +116,18 @@ export function declaredCanvasNodeAssetCategory(node: CanvasNodeData): AssetCate
     if (node.metadata?.assetCategory) return node.metadata.assetCategory;
     if (node.metadata?.workflowKind === "character") return "character";
     if (node.metadata?.workflowKind === "scene") return "environment";
-    if (node.metadata?.workflowKind === "styleboard") return "style";
+    if (node.metadata?.workflowKind === "styleboard") return "material";
     return undefined;
 }
 
 export function canvasNodeAssetCategory(node: CanvasNodeData): AssetCategory {
     const declared = declaredCanvasNodeAssetCategory(node);
     if (declared) return declared;
+    if (node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Video || node.type === CanvasNodeType.Audio) return "material";
     return "other";
 }
 
-function canvasAssetFallbackTitle(type: CanvasNodeType) {
+function canvasAssetFallbackTitle(type: CanvasNodeTypeId) {
     if (type === CanvasNodeType.Image) return "画布图片";
     if (type === CanvasNodeType.Video) return "画布视频";
     if (type === CanvasNodeType.Audio) return "画布音频";

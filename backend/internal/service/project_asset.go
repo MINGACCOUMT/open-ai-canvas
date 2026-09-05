@@ -2,19 +2,34 @@ package service
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
 	"infinite-canvas/backend/internal/model"
 )
 
+// 资产来源：媒体导入合成/画布产物自动同步。画布产物用 canvas 以便素材面板分组。
+const (
+	AssetSourceUploaded = "uploaded"
+	AssetSourceCanvas   = "canvas"
+)
+
 type LinkProjectAssetRequest struct {
-	AssetID  string `json:"assetId"`
-	Category string `json:"category"`
+	AssetID  string  `json:"assetId"`
+	Category string  `json:"category"`
+	FolderID *string `json:"folderId"`
+	// Title 媒体导入场景下由前端携带原始文件名；已有资产时忽略。
+	Title string `json:"title"`
+	// Source 仅媒体导入合成时生效：uploaded（默认）或 canvas（画布产物自动同步）。
+	Source string `json:"source"`
 }
 
-type UpdateProjectAssetCategoryRequest struct {
-	Category string `json:"category"`
+type UpdateProjectAssetRequest struct {
+	Category *string `json:"category"`
+	FolderID *string `json:"folderId"`
 }
 
 type CreateAssetVersionRequest struct {
@@ -32,7 +47,13 @@ type ProjectAssetSummary struct {
 	PrimaryVersionID string                   `json:"primaryVersionId,omitempty"`
 	VersionCount     int                      `json:"versionCount"`
 	Usages           []string                 `json:"usages"`
+	FolderID         string                   `json:"folderId,omitempty"`
+	Position         int                      `json:"position"`
+	StorageKey       string                   `json:"storageKey,omitempty"`
+	DurationMs       int64                    `json:"durationMs,omitempty"`
+	PreviewText      string                   `json:"previewText,omitempty"`
 	UpdatedAt        time.Time                `json:"updatedAt"`
+	Source           string                   `json:"source,omitempty"`
 	Character        *CharacterCardSummary    `json:"character,omitempty"`
 }
 
@@ -92,9 +113,21 @@ func (s *Service) LinkProjectAsset(userID string, projectID string, req LinkProj
 		return ProjectAssetSummary{}, err
 	}
 	assetID := strings.TrimSpace(req.AssetID)
+	source := strings.TrimSpace(req.Source)
+	if source != AssetSourceCanvas {
+		source = AssetSourceUploaded
+	}
 	asset, err := s.repo.AssetForUser(userID, assetID)
-	if err != nil {
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return ProjectAssetSummary{}, err
+	}
+	if asset == nil {
+		// 媒体导入只落 resources 表；首次链接时按资源元数据合成资产记录，
+		// 避免“资源存在但无资产记录”导致导入永远失败。
+		asset, err = s.assetFromUploadedResource(userID, assetID, req.Title, source)
+		if err != nil {
+			return ProjectAssetSummary{}, err
+		}
 	}
 	category := model.AssetCategory(strings.TrimSpace(req.Category))
 	if category == "" {
@@ -103,20 +136,16 @@ func (s *Service) LinkProjectAsset(userID string, projectID string, req LinkProj
 	if !validAssetCategory(category) {
 		return ProjectAssetSummary{}, BadAuthRequest("不支持的资产业务分类")
 	}
+	folderID, err := s.resolveProjectAssetFolderID(projectID, req.FolderID)
+	if err != nil {
+		return ProjectAssetSummary{}, err
+	}
 	linked, err := s.repo.ProjectAssetLinked(projectID, asset.ID)
 	if err != nil {
 		return ProjectAssetSummary{}, err
 	}
 	if linked {
-		versions, versionErr := s.repo.AssetVersions(asset.ID)
-		if versionErr != nil {
-			return ProjectAssetSummary{}, versionErr
-		}
-		usages, usageErr := s.repo.ProjectAssetUsageRoles(projectID, asset.ID)
-		if usageErr != nil {
-			return ProjectAssetSummary{}, usageErr
-		}
-		return ProjectAssetSummary{ID: asset.ID, Title: asset.Title, MediaType: asset.Kind, Category: asset.Category, Status: asset.Status, PrimaryVersionID: asset.PrimaryVersionID, VersionCount: len(versions), Usages: usages, UpdatedAt: asset.UpdatedAt}, nil
+		return s.projectAssetSummary(userID, projectID, asset)
 	}
 	now := time.Now()
 	asset.Category = category
@@ -135,7 +164,11 @@ func (s *Service) LinkProjectAsset(userID string, projectID string, req LinkProj
 		versions = append(versions, version)
 	}
 	asset.UpdatedAt = now
-	link := model.ProjectAssetLink{ID: newID(), ProjectID: projectID, AssetID: asset.ID, CreatedAt: now}
+	position, err := s.repo.NextProjectAssetPosition(projectID, folderID)
+	if err != nil {
+		return ProjectAssetSummary{}, err
+	}
+	link := model.ProjectAssetLink{ID: newID(), ProjectID: projectID, AssetID: asset.ID, FolderID: folderID, Position: position, CreatedAt: now}
 	created, err := s.repo.LinkProjectAsset(asset, initialVersion, &link)
 	if err != nil {
 		return ProjectAssetSummary{}, err
@@ -145,17 +178,65 @@ func (s *Service) LinkProjectAsset(userID string, projectID string, req LinkProj
 		if currentErr != nil {
 			return ProjectAssetSummary{}, currentErr
 		}
-		currentVersions, versionErr := s.repo.AssetVersions(asset.ID)
-		if versionErr != nil {
-			return ProjectAssetSummary{}, versionErr
-		}
-		usages, usageErr := s.repo.ProjectAssetUsageRoles(projectID, asset.ID)
-		if usageErr != nil {
-			return ProjectAssetSummary{}, usageErr
-		}
-		return ProjectAssetSummary{ID: current.ID, Title: current.Title, MediaType: current.Kind, Category: current.Category, Status: current.Status, PrimaryVersionID: current.PrimaryVersionID, VersionCount: len(currentVersions), Usages: usages, UpdatedAt: current.UpdatedAt}, nil
+		return s.projectAssetSummary(userID, projectID, current)
 	}
-	return ProjectAssetSummary{ID: asset.ID, Title: asset.Title, MediaType: asset.Kind, Category: asset.Category, Status: asset.Status, PrimaryVersionID: asset.PrimaryVersionID, VersionCount: len(versions), Usages: []string{}, UpdatedAt: asset.UpdatedAt}, nil
+	return s.projectAssetSummary(userID, projectID, asset)
+}
+
+// assetFromUploadedResource 把媒体导入上传的 Resource 合成为资产记录（内存构造，不落库）。
+// 资产创建与项目链接由 LinkProjectAsset 事务原子提交，避免失败留下孤立资产。
+func (s *Service) assetFromUploadedResource(userID string, resourceID string, title string, source string) (*model.Asset, error) {
+	resource, err := s.repo.ResourceForUser(userID, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	if resource.Kind == "" {
+		return nil, BadAuthRequest("资源缺少媒体类型，无法导入")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"storageKey": "resource:" + resource.ID,
+			"mimeType":   resource.MimeType,
+			"kind":       resource.Kind,
+			"size":       resource.Size,
+			"width":      resource.Width,
+			"height":     resource.Height,
+			"durationMs": resource.DurationMs,
+			"status":     resource.Status,
+			"mediaType":  resource.Kind,
+			"source":     source,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = mediaTitleFallback(resource)
+	}
+	asset := &model.Asset{
+		ID:          resource.ID,
+		UserID:      userID,
+		Kind:        resource.Kind,
+		Category:    model.NormalizeAssetCategory("", resource.Kind),
+		Status:      model.AssetVersionStatusConfirmed,
+		Title:       title,
+		PayloadJSON: string(payload),
+		CreatedAt:   resource.CreatedAt,
+		UpdatedAt:   resource.UpdatedAt,
+	}
+	// 不在此预落库：资产创建交给 LinkProjectAsset 的事务统一提交，
+	// 事务失败时与链接一起回滚，避免留下“有资产无链接”的孤儿记录。
+	return asset, nil
+}
+
+// mediaTitleFallback 资源无文件名时的展示标题：未命名 + 媒体类型 + 分辨率。
+func mediaTitleFallback(resource *model.Resource) string {
+	base := "未命名" + resource.Kind
+	if resource.Width > 0 && resource.Height > 0 {
+		base += fmt.Sprintf(" %dx%d", resource.Width, resource.Height)
+	}
+	return base
 }
 
 func (s *Service) UnlinkProjectAsset(userID string, projectID string, assetID string) error {
@@ -214,7 +295,7 @@ func canvasReferencesCharacterAsset(payloadJSON string, assetID string) (bool, e
 	return false, nil
 }
 
-func (s *Service) UpdateProjectAssetCategory(userID string, projectID string, assetID string, req UpdateProjectAssetCategoryRequest) (ProjectAssetSummary, error) {
+func (s *Service) UpdateProjectAsset(userID string, projectID string, assetID string, req UpdateProjectAssetRequest) (ProjectAssetSummary, error) {
 	if _, err := s.repo.ProjectForUser(userID, projectID); err != nil {
 		return ProjectAssetSummary{}, err
 	}
@@ -229,27 +310,38 @@ func (s *Service) UpdateProjectAssetCategory(userID string, projectID string, as
 	if !linked {
 		return ProjectAssetSummary{}, BadAuthRequest("素材尚未加入当前项目")
 	}
-	category := model.AssetCategory(strings.TrimSpace(req.Category))
-	if !validAssetCategory(category) {
-		return ProjectAssetSummary{}, BadAuthRequest("不支持的资产业务分类")
+	if req.Category != nil && req.FolderID != nil {
+		return ProjectAssetSummary{}, BadAuthRequest("一次只能修改素材分类或所在文件夹")
 	}
-	asset.Category = category
-	asset.UpdatedAt = time.Now()
-	if err := s.repo.UpdateAssetDomain(asset); err != nil {
-		return ProjectAssetSummary{}, err
+	if req.Category != nil {
+		category := model.AssetCategory(strings.TrimSpace(*req.Category))
+		if !validAssetCategory(category) {
+			return ProjectAssetSummary{}, BadAuthRequest("不支持的资产业务分类")
+		}
+		asset.Category = category
+		asset.UpdatedAt = time.Now()
+		if err := s.repo.UpdateAssetDomain(asset); err != nil {
+			return ProjectAssetSummary{}, err
+		}
+		if err := s.repo.BumpProjectRevision(projectID); err != nil {
+			return ProjectAssetSummary{}, err
+		}
+	} else if req.FolderID != nil {
+		folderID, folderErr := s.resolveProjectAssetFolderID(projectID, req.FolderID)
+		if folderErr != nil {
+			return ProjectAssetSummary{}, folderErr
+		}
+		position, positionErr := s.repo.NextProjectAssetPosition(projectID, folderID)
+		if positionErr != nil {
+			return ProjectAssetSummary{}, positionErr
+		}
+		if err := s.repo.MoveProjectAsset(projectID, asset.ID, folderID, position); err != nil {
+			return ProjectAssetSummary{}, err
+		}
+	} else {
+		return ProjectAssetSummary{}, BadAuthRequest("没有可更新的素材字段")
 	}
-	if err := s.repo.BumpProjectRevision(projectID); err != nil {
-		return ProjectAssetSummary{}, err
-	}
-	versions, err := s.repo.AssetVersions(asset.ID)
-	if err != nil {
-		return ProjectAssetSummary{}, err
-	}
-	usages, err := s.repo.ProjectAssetUsageRoles(projectID, asset.ID)
-	if err != nil {
-		return ProjectAssetSummary{}, err
-	}
-	return ProjectAssetSummary{ID: asset.ID, Title: asset.Title, MediaType: asset.Kind, Category: asset.Category, Status: asset.Status, PrimaryVersionID: asset.PrimaryVersionID, VersionCount: len(versions), Usages: usages, UpdatedAt: asset.UpdatedAt}, nil
+	return s.projectAssetSummary(userID, projectID, asset)
 }
 
 func (s *Service) CreateProjectAssetVersion(userID string, projectID string, assetID string, req CreateAssetVersionRequest) (model.AssetVersion, error) {
@@ -373,7 +465,15 @@ func (s *Service) ConfirmProjectAssetCandidate(userID string, projectID string, 
 	candidate.Status = "confirmed"
 	candidate.ResolvedAssetID = assetID
 	candidate.UpdatedAt = now
-	link := model.ProjectAssetLink{ID: newID(), ProjectID: projectID, AssetID: assetID, CreatedAt: now}
+	folderID, folderErr := s.resolveProjectAssetFolderID(projectID, nil)
+	if folderErr != nil {
+		return ProjectAssetSummary{}, folderErr
+	}
+	position, positionErr := s.repo.NextProjectAssetPosition(projectID, folderID)
+	if positionErr != nil {
+		return ProjectAssetSummary{}, positionErr
+	}
+	link := model.ProjectAssetLink{ID: newID(), ProjectID: projectID, AssetID: assetID, FolderID: folderID, Position: position, CreatedAt: now}
 	if err := s.repo.ConfirmProjectAssetCandidate(candidate, &asset, &version, &link, createAsset); err != nil {
 		return ProjectAssetSummary{}, err
 	}
@@ -445,7 +545,7 @@ func containsString(values []string, target string) bool {
 
 func validAssetCategory(category model.AssetCategory) bool {
 	switch category {
-	case model.AssetCategoryCharacter, model.AssetCategoryEnvironment, model.AssetCategoryWardrobe, model.AssetCategoryProp, model.AssetCategoryWeapon, model.AssetCategoryStyle, model.AssetCategoryOther:
+	case model.AssetCategoryCharacter, model.AssetCategoryEnvironment, model.AssetCategoryProp, model.AssetCategoryMaterial, model.AssetCategoryOther:
 		return true
 	default:
 		return false
@@ -461,7 +561,12 @@ func (s *Service) projectAssetSummary(userID string, projectID string, asset *mo
 	if err != nil {
 		return ProjectAssetSummary{}, err
 	}
-	summary := ProjectAssetSummary{ID: asset.ID, Title: asset.Title, MediaType: asset.Kind, Category: asset.Category, Status: asset.Status, PrimaryVersionID: asset.PrimaryVersionID, VersionCount: len(versions), Usages: usages, UpdatedAt: asset.UpdatedAt}
+	link, err := s.repo.ProjectAssetLink(projectID, asset.ID)
+	if err != nil {
+		return ProjectAssetSummary{}, err
+	}
+	storageKey, previewText, source, durationMs := projectAssetPreview(asset.PayloadJSON)
+	summary := ProjectAssetSummary{ID: asset.ID, Title: asset.Title, MediaType: asset.Kind, Category: asset.Category, Status: asset.Status, PrimaryVersionID: asset.PrimaryVersionID, VersionCount: len(versions), Usages: usages, FolderID: link.FolderID, Position: link.Position, StorageKey: storageKey, PreviewText: previewText, DurationMs: durationMs, UpdatedAt: asset.UpdatedAt, Source: source}
 	if asset.Category == model.AssetCategoryCharacter && asset.PrimaryVersionID != "" {
 		card, cardErr := s.characterCard(userID, asset)
 		if cardErr != nil {
@@ -470,4 +575,24 @@ func (s *Service) projectAssetSummary(userID string, projectID string, asset *mo
 		summary.Character = &card
 	}
 	return summary, nil
+}
+
+func projectAssetPreview(payloadJSON string) (string, string, string, int64) {
+	var payload struct {
+		Data struct {
+			StorageKey string `json:"storageKey"`
+			Content    string `json:"content"`
+			Source     string `json:"source"`
+			DurationMs int64  `json:"durationMs"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(payloadJSON), &payload) != nil {
+		return "", "", "", 0
+	}
+	previewRunes := []rune(strings.TrimSpace(payload.Data.Content))
+	if len(previewRunes) > 240 {
+		previewRunes = append(previewRunes[:240], '…')
+	}
+	return strings.TrimSpace(payload.Data.StorageKey), string(previewRunes), strings.TrimSpace(payload.Data.Source), payload.Data.DurationMs
+
 }

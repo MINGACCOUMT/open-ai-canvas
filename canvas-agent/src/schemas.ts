@@ -5,15 +5,25 @@ const positionSchema = z.object({ x: z.number(), y: z.number() });
 const viewportSchema = z.object({ x: z.number(), y: z.number(), k: z.number() });
 const nodeTypeSchema = z.enum(["image", "text", "script", "video", "audio", "frame"]);
 const generationModeSchema = z.enum(["text", "image", "video", "audio"]);
+const assetCategorySchema = z.enum(["character", "environment", "prop", "material", "other"]);
+const agentCandidateCategorySchema = z.enum(["environment", "prop", "material", "other"]);
 const projectIdSchema = z.string().min(1).optional();
-const projectCandidateSchema = z.object({ unitId: z.string().optional(), shotId: z.string().optional(), name: z.string().min(1), category: z.string().min(1), details: recordSchema.optional() });
+const projectCandidateSchema = z.object({ unitId: z.string().optional(), shotId: z.string().optional(), name: z.string().min(1), category: agentCandidateCategorySchema, details: recordSchema.optional() });
 const projectShotSchema = z.object({ id: z.string().optional(), unitId: z.string().optional(), title: z.string().min(1), description: z.string().optional(), position: z.number().int().min(0).optional(), durationMs: z.number().int().min(0).optional(), status: z.string().optional() });
 
 export const toolNames = [
     "canvas_get_state",
+    "canvas_get_context",
+    "canvas_find_nodes",
+    "canvas_get_node",
+    "canvas_get_connection",
+    "canvas_get_generation_tasks",
+    "canvas_get_resources",
+    "canvas_validate_ops",
     "canvas_get_selection",
     "canvas_export_snapshot",
     "canvas_apply_ops",
+    "canvas_create_workflow",
     "canvas_create_node",
     "canvas_create_text_node",
     "canvas_create_text_nodes",
@@ -48,7 +58,7 @@ export type ToolName = (typeof toolNames)[number];
 export const canvasOpSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("add_node"), nodeType: nodeTypeSchema.optional(), id: z.string().optional(), title: z.string().optional(), x: z.number().optional(), y: z.number().optional(), width: z.number().optional(), height: z.number().optional(), position: positionSchema.optional(), metadata: recordSchema.optional() }).passthrough(),
     z.object({ type: z.literal("update_node"), id: z.string(), patch: recordSchema.optional(), metadata: recordSchema.optional() }).passthrough(),
-    z.object({ type: z.literal("delete_node"), id: z.string().optional(), ids: z.array(z.string()).optional() }).passthrough(),
+    z.object({ type: z.literal("delete_node"), id: z.string().optional(), ids: z.array(z.string()).optional(), nodeType: nodeTypeSchema.optional() }).passthrough(),
     z.object({ type: z.literal("delete_connections"), id: z.string().optional(), ids: z.array(z.string()).optional(), all: z.boolean().optional() }).passthrough(),
     z.object({ type: z.literal("connect_nodes"), id: z.string().optional(), fromNodeId: z.string(), toNodeId: z.string(), fromHandleId: z.string().optional(), toHandleId: z.string().optional() }).passthrough(),
     z.object({ type: z.literal("set_viewport"), viewport: viewportSchema }).passthrough(),
@@ -63,6 +73,30 @@ const textNodeSchema = z.object({
     y: z.number().optional(),
     width: z.number().optional(),
     height: z.number().optional(),
+});
+
+const workflowNodeSchema = z.object({
+    ref: z.string().min(1),
+    kind: z.enum(["text", "script", "image", "video", "audio", "character_cards", "character_three_view", "storyboard_video"]),
+    title: z.string().min(1),
+    content: z.string().optional(),
+    prompt: z.string().optional(),
+    description: z.string().optional(),
+    referenceRefs: z.array(z.string()).optional(),
+    referenceNodeIds: z.array(z.string()).optional(),
+    runGeneration: z.boolean().optional(),
+    width: z.number().positive().optional(),
+    height: z.number().positive().optional(),
+});
+const workflowSchema = z.object({
+    title: z.string().optional(),
+    description: z.string().optional(),
+    nodes: z.array(workflowNodeSchema).min(1),
+    edges: z.array(z.object({ from: z.string().min(1), to: z.string().min(1) })).optional(),
+    direction: z.enum(["horizontal", "vertical"]).optional(),
+    start: positionSchema.optional(),
+    gap: z.number().min(48).optional(),
+    autoRun: z.boolean().optional(),
 });
 
 const generationOptionsSchema = z.object({
@@ -90,9 +124,17 @@ const generationFlowSchema = z.object({
 
 export const toolInputSchemas = {
     canvas_get_state: z.object({}).passthrough(),
+    canvas_get_context: z.object({}).passthrough(),
+    canvas_find_nodes: z.object({ query: z.string().optional(), ids: z.array(z.string()).optional(), types: z.array(z.string()).optional(), statuses: z.array(z.string()).optional(), resourceOnly: z.boolean().optional(), limit: z.number().int().min(1).max(200).optional() }),
+    canvas_get_node: z.object({ id: z.string().min(1) }),
+    canvas_get_connection: z.object({ id: z.string().min(1) }),
+    canvas_get_generation_tasks: z.object({ status: z.string().optional(), nodeIds: z.array(z.string()).optional(), limit: z.number().int().min(1).max(200).optional() }),
+    canvas_get_resources: z.object({ nodeIds: z.array(z.string()).optional(), status: z.string().optional(), limit: z.number().int().min(1).max(300).optional() }),
+    canvas_validate_ops: z.object({ ops: z.array(canvasOpSchema) }),
     canvas_get_selection: z.object({}).passthrough(),
     canvas_export_snapshot: z.object({}).passthrough(),
-    canvas_apply_ops: z.object({ ops: z.array(canvasOpSchema) }),
+    canvas_apply_ops: z.object({ ops: z.array(canvasOpSchema), expectedRevision: z.number().int().nonnegative().optional(), expectedStateHash: z.string().min(1).optional() }),
+    canvas_create_workflow: workflowSchema,
     canvas_create_node: z.object({ nodeType: nodeTypeSchema, title: z.string().optional(), x: z.number().optional(), y: z.number().optional(), width: z.number().optional(), height: z.number().optional(), metadata: recordSchema.optional() }),
     canvas_create_text_node: z.object({ text: z.string().optional(), x: z.number().optional(), y: z.number().optional(), title: z.string().optional(), width: z.number().optional(), height: z.number().optional() }),
     canvas_create_text_nodes: z.object({ items: z.array(textNodeSchema).min(1), x: z.number().optional(), y: z.number().optional(), gap: z.number().optional(), direction: z.enum(["row", "column"]).optional() }),
@@ -110,7 +152,7 @@ export const toolInputSchemas = {
     canvas_connect_nodes: z.object({ connections: z.array(z.object({ fromNodeId: z.string(), toNodeId: z.string(), fromHandleId: z.string().optional(), toHandleId: z.string().optional() })).min(1) }),
     canvas_select_nodes: z.object({ ids: z.array(z.string()) }),
     canvas_set_viewport: z.object({ viewport: viewportSchema }),
-    canvas_run_generation: z.object({ nodeId: z.string(), mode: generationModeSchema.optional(), prompt: z.string().optional() }),
+    canvas_run_generation: z.object({ nodeId: z.string(), mode: generationModeSchema.optional(), prompt: z.string().optional(), retry: z.boolean().optional() }),
     project_get_context: z.object({ projectId: projectIdSchema }),
     project_list_units: z.object({ projectId: projectIdSchema, kind: z.string().optional(), status: z.string().optional() }),
     project_extract_asset_candidates: z.object({ projectId: projectIdSchema, candidates: z.array(projectCandidateSchema).min(1).max(100) }),
@@ -118,16 +160,24 @@ export const toolInputSchemas = {
     project_create_or_update_shots: z.object({ projectId: projectIdSchema, shots: z.array(projectShotSchema).min(1).max(100) }),
     project_link_shot_asset: z.object({ projectId: projectIdSchema, shotId: z.string().min(1), assetVersionId: z.string().min(1), role: z.enum(["reference", "start_frame", "end_frame", "keyframe", "storyboard", "output"]) }),
     project_start_workflow_step: z.object({ projectId: projectIdSchema, stepId: z.string().min(1) }),
-    project_link_asset: z.object({ projectId: projectIdSchema, assetId: z.string().min(1), category: z.string().min(1) }),
+    project_link_asset: z.object({ projectId: projectIdSchema, assetId: z.string().min(1), category: assetCategorySchema }),
     project_upsert_asset_version: z.object({ projectId: projectIdSchema, assetId: z.string().min(1), prompt: z.string().optional(), definitionJson: z.string().optional(), note: z.string().optional() }),
     project_register_task_output: z.object({ projectId: projectIdSchema, stepId: z.string().min(1), taskId: z.string().min(1), assetVersionId: z.string().optional(), resourceId: z.string().optional(), mediaType: z.string().optional(), role: z.enum(["reference", "start_frame", "end_frame", "keyframe", "storyboard", "output"]).optional(), metadataJson: z.string().optional(), outputJson: z.string().optional() }),
 } satisfies Record<ToolName, z.AnyZodObject>;
 
 export const toolDescriptions: Record<ToolName, string> = {
     canvas_get_state: "读取当前网页画布的节点、连线、选区和视口。",
+    canvas_get_context: "读取面向 Agent 的语义化画布上下文：节点用途、连接关系、选区、资源引用、生成状态和状态哈希。优先于直接猜测节点 metadata。",
+    canvas_find_nodes: "按标题、内容、提示词、类型、状态、资产或工作流检索真实节点，返回可用于后续写操作的节点 id。",
+    canvas_get_node: "按真实节点 id 精确读取单个节点的语义、完整安全 metadata、资源状态和关联连线；找不到时明确返回未找到。",
+    canvas_get_connection: "按真实连线 id 精确读取连线端点、端点节点摘要和 handle 信息；找不到时明确返回未找到。",
+    canvas_get_generation_tasks: "读取当前画布节点已经绑定的生成任务观察状态，包括 taskId、节点、任务状态、进度、阶段和错误；这是画布快照观察，不会主动轮询上游。",
+    canvas_get_resources: "读取当前画布引用的媒体资源清单，包括资源/资产引用、类型、尺寸、大小、时长和就绪状态；不会返回媒体 URL。",
+    canvas_validate_ops: "在真正写入前校验批量操作中的节点 id、连接关系和参数，避免对不存在节点或错误资源执行操作。",
     canvas_get_selection: "读取当前网页画布选中的节点。",
     canvas_export_snapshot: "导出当前画布快照，用于理解布局。",
     canvas_apply_ops: "批量操作当前网页画布。ops 支持 add_node、update_node、delete_node、delete_connections、connect_nodes、set_viewport、select_nodes、run_generation。",
+    canvas_create_workflow: "创建语义化工作流/流水线。character_cards 是角色拆分图片卡片，character_three_view 是角色三视图，storyboard_video 是分镜剧情视频。媒体节点必须有 prompt/content；已有素材使用先读取到的真实 node id 填入 referenceNodeIds。自动分配 id、根据真实节点尺寸布局、建立 edges/referenceRefs/referenceNodeIds 连线并返回可验证结果；不要用批量文本节点代替工作流。",
     canvas_create_node: "创建任意类型节点：text、script、image、video、audio、frame。适合创建脚本、媒体占位、背板或自定义 metadata 节点。",
     canvas_create_text_node: "在当前画布创建单个文本节点。",
     canvas_create_text_nodes: "批量创建文本节点，适合生成标题、段落、脚本、说明等内容块。",
@@ -145,10 +195,10 @@ export const toolDescriptions: Record<ToolName, string> = {
     canvas_connect_nodes: "批量连接节点。",
     canvas_select_nodes: "设置当前选中节点。",
     canvas_set_viewport: "调整画布视口。",
-    canvas_run_generation: "触发指定节点生成，通常用于配置节点或文本/图片/视频/音频节点。",
+    canvas_run_generation: "触发指定节点生成；对已有生成任务明确重试时传 retry=true，以复用产品级重试幂等身份。",
     project_get_context: "读取当前短剧项目的章节、画布、资产、镜头、候选和工作流事实。",
     project_list_units: "按类型或状态筛选当前短剧项目的章节/项目单元。",
-    project_extract_asset_candidates: "将分镜识别出的角色、场景、服饰、道具或武器需求登记为待确认资产候选。",
+    project_extract_asset_candidates: "将分镜识别出的场景、道具、素材或其他需求登记为待确认资产候选；角色只在剧情章节提取，不通过此工具重复创建。",
     project_confirm_asset_candidate: "确认一个资产候选，创建正式资产或关联已有个人资产。",
     project_create_or_update_shots: "创建或更新项目镜头业务数据，不把镜头状态写进画布 metadata。",
     project_link_shot_asset: "将具体资产版本按首帧、尾帧或参考等用途关联到镜头。",

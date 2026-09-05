@@ -1,7 +1,7 @@
 import localforage from "localforage";
 
 import { getActiveUserScope } from "@/lib/user-scope";
-import { getResource, getResourceBlob, resourceIdFromStorageKey, type RemoteResource } from "@/services/api/resources";
+import { getResourceBlob, resourceIdFromStorageKey } from "@/services/api/resources";
 
 type ResourceCacheMeta = {
     key: string;
@@ -18,6 +18,7 @@ const metaStore = localforage.createInstance({ name: "infinite-canvas", storeNam
 const objectUrls = new Map<string, string>();
 const sessionBlobs = new Map<string, Blob>();
 const inFlight = new Map<string, Promise<string>>();
+const scheduled = new Set<string>();
 const downloadQueue: Array<() => void> = [];
 let activeDownloads = 0;
 let persistQueue: Promise<void> = Promise.resolve();
@@ -45,6 +46,25 @@ export async function cacheResourceObjectUrl(storageKey: string) {
     const task = withDownloadSlot(() => downloadAndCacheResource(storageKey, target)).finally(() => inFlight.delete(target.key));
     inFlight.set(target.key, task);
     return task;
+}
+
+/**
+ * 播放器先使用支持 Range 的资源 URL 起播；确认用户实际播放后，再延迟下载完整 Blob。
+ * 这样不会让 IndexedDB 缓存阻塞首帧，同时后续打开可直接复用本地 Object URL。
+ */
+export function scheduleResourceBlobCache(storageKey: string, delayMs = 4_000) {
+    if (!resourceIdFromStorageKey(storageKey) || scheduled.has(storageKey)) return;
+    scheduled.add(storageKey);
+    const run = () => {
+        void cacheResourceObjectUrl(storageKey)
+            .catch(() => "")
+            .finally(() => scheduled.delete(storageKey));
+    };
+    if (typeof window === "undefined") {
+        run();
+        return;
+    }
+    window.setTimeout(run, Math.max(0, delayMs));
 }
 
 function withDownloadSlot<T>(task: () => Promise<T>) {
@@ -147,23 +167,20 @@ async function readCachedObjectUrl(target: ResourceCacheMeta) {
 async function cacheTarget(storageKey: string): Promise<ResourceCacheMeta | null> {
     const resourceId = resourceIdFromStorageKey(storageKey);
     if (!resourceId) return null;
-    const resource = await getResource(resourceId);
     const userScope = getActiveUserScope();
-    if (userScope === "guest" || resource.userId !== userScope) throw new Error("当前用户不能读取该媒体缓存");
-    const version = resourceVersion(resource);
+    if (userScope === "guest") throw new Error("游客不能读取远程媒体缓存");
+    // resource ID 是不可变资源的稳定标识，文件接口本身负责鉴权。
+    // 缓存初始化不能先对每个资源读取一遍元数据，否则首屏会重新形成 N+1 请求。
+    const version = "file";
     return {
         key: `${userScope}:${resourceId}:${version}`,
         userScope,
         resourceId,
         version,
-        size: resource.size || 0,
-        mimeType: resource.mimeType || "application/octet-stream",
+        size: 0,
+        mimeType: "application/octet-stream",
         lastAccessedAt: Date.now(),
     };
-}
-
-function resourceVersion(resource: RemoteResource) {
-    return (resource.etag || `${resource.size}:${resource.updatedAt}`).replace(/[^a-zA-Z0-9:._-]/g, "_");
 }
 
 async function touchCacheMeta(target: ResourceCacheMeta) {

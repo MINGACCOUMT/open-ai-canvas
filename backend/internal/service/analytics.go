@@ -1,10 +1,12 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -228,9 +230,17 @@ func (s *Service) decorateAPICallLogs(logs []model.ApiCallLog) error {
 	for _, user := range users {
 		userByID[user.ID] = user
 	}
+	billingOrderIDs := make([]string, 0, len(logs))
+	seenBillingOrderIDs := make(map[string]struct{}, len(logs))
 	taskIDs := make([]string, 0, len(logs))
 	seenTaskIDs := make(map[string]struct{}, len(logs))
 	for _, log := range logs {
+		if log.Billable && log.BillingOrderID != "" {
+			if _, exists := seenBillingOrderIDs[log.BillingOrderID]; !exists {
+				seenBillingOrderIDs[log.BillingOrderID] = struct{}{}
+				billingOrderIDs = append(billingOrderIDs, log.BillingOrderID)
+			}
+		}
 		if (log.Capability != "image" && log.Capability != "video") || log.TaskID == "" {
 			continue
 		}
@@ -248,6 +258,10 @@ func (s *Service) decorateAPICallLogs(logs []model.ApiCallLog) error {
 	for _, task := range tasks {
 		taskByID[task.ID] = task
 	}
+	billingOrderByID, err := s.repo.BillingOrdersByIDs(billingOrderIDs)
+	if err != nil {
+		return err
+	}
 	for index := range logs {
 		if logs[index].StartedAt.IsZero() {
 			logs[index].StartedAt = logs[index].CreatedAt
@@ -262,6 +276,17 @@ func (s *Service) decorateAPICallLogs(logs []model.ApiCallLog) error {
 		if user, exists := userByID[logs[index].UserID]; exists {
 			logs[index].UserDisplayName = user.DisplayName
 			logs[index].UserAccount = user.Username
+		}
+		if logs[index].Billable {
+			if order, exists := billingOrderByID[logs[index].BillingOrderID]; exists && order.UserID == logs[index].UserID {
+				logs[index].BillingAvailable = true
+				logs[index].BillingStatus = order.Status
+				if order.Status == model.BillingStatusSettled {
+					logs[index].BillingAmount = order.ActualAmountMicrocredits
+				} else if order.Status != model.BillingStatusRefunded {
+					logs[index].BillingAmount = order.ReservedAmountMicrocredits
+				}
+			}
 		}
 		if task, exists := taskByID[logs[index].TaskID]; exists && task.UserID == logs[index].UserID {
 			logs[index].TaskStatus = task.Status
@@ -280,33 +305,58 @@ func (s *Service) decorateAPICallLogs(logs []model.ApiCallLog) error {
 
 // 管理员媒体读取必须同时校验日志、任务和资源归属，不能绕过用户资源边界按资源 ID 任意读取。
 func (s *Service) OpenAdminAPICallLogMediaRange(actor *model.User, logID string, rangeHeader string) (*ResourceStream, error) {
-	if err := s.RequireAdmin(actor); err != nil {
+	userID, resource, err := s.adminAPICallLogMediaResource(actor, logID)
+	if err != nil {
 		return nil, err
+	}
+	return s.openResourceRange(userID, resource, rangeHeader)
+}
+
+func (s *Service) PrepareAdminAPICallLogMediaDelivery(actor *model.User, logID string, rangeHeader string) (*ResourceDelivery, error) {
+	userID, resource, err := s.adminAPICallLogMediaResource(actor, logID)
+	if err != nil {
+		return nil, err
+	}
+	delivery, err := s.prepareResourceDelivery(userID, resource, ResourceDeliveryOptions{})
+	if err != nil || delivery.RedirectURL != "" {
+		return delivery, err
+	}
+	stream, err := s.openResourceRange(userID, resource, rangeHeader)
+	if err != nil {
+		return nil, err
+	}
+	delivery.Stream = stream
+	return delivery, nil
+}
+
+func (s *Service) adminAPICallLogMediaResource(actor *model.User, logID string) (string, *model.Resource, error) {
+	if err := s.RequireAdmin(actor); err != nil {
+		return "", nil, err
 	}
 	log, err := s.repo.APICallLog(strings.TrimSpace(logID))
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if log.TaskID == "" || (log.Capability != "image" && log.Capability != "video") {
-		return nil, BadAuthRequest("该请求没有可预览媒体")
+		return "", nil, BadAuthRequest("该请求没有可预览媒体")
 	}
 	task, err := s.repo.Task(log.TaskID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if task.UserID != log.UserID {
-		return nil, BadAuthRequest("请求与媒体归属不一致")
+		return "", nil, BadAuthRequest("请求与媒体归属不一致")
 	}
 	previewURL, _ := taskMediaPreview(task.ResultJSON, task.Type)
 	resourceID := canvasResourceID(previewURL)
 	if resourceID == "" {
-		return nil, BadAuthRequest("该请求没有已持久化媒体")
+		return "", nil, BadAuthRequest("该请求没有已持久化媒体")
 	}
 	resource, err := s.repo.ResourceForUser(log.UserID, resourceID)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	return s.openResourceRange(log.UserID, resource, rangeHeader)
+	return log.UserID, resource, nil
 }
 
 func (s *Service) AdminAPICallLog(actor *model.User, id string) (*model.ApiCallLog, error) {
@@ -346,13 +396,22 @@ func (s *Service) AdminAPICallLogsCSV(actor *model.User, query APICallLogQuery) 
 	var buffer bytes.Buffer
 	buffer.WriteString("\xEF\xBB\xBF")
 	writer := csv.NewWriter(&buffer)
-	_ = writer.Write([]string{"时间", "用户", "用户账号", "渠道", "模型", "能力", "状态", "轮询次数", "耗时毫秒", "输入Token", "输出Token", "缓存Token", "计费", "币种", "错误码", "错误"})
+	_ = writer.Write([]string{"时间", "用户", "用户账号", "渠道", "模型", "能力", "状态", "轮询次数", "耗时毫秒", "输入Token", "输出Token", "缓存Token", "积分计费(微积分)", "积分计费状态", "上游估算费用(微单位)", "币种", "错误码", "错误"})
 	for _, log := range logs {
 		startedAt := log.StartedAt
 		if startedAt.IsZero() {
 			startedAt = log.CreatedAt
 		}
-		_ = writer.Write([]string{startedAt.UTC().Format(time.RFC3339), log.UserDisplayName, log.UserAccount, log.ChannelName, log.Model, log.Capability, string(log.Status), strconv.Itoa(log.PollCount), strconv.FormatInt(log.DurationMs, 10), strconv.FormatInt(log.InputTokens, 10), strconv.FormatInt(log.OutputTokens, 10), strconv.FormatInt(log.CachedTokens, 10), strconv.FormatInt(log.EstimatedCostMicros, 10), log.Currency, log.ErrorCode, log.Error})
+		billingAmount, billingStatus := "", ""
+		if log.BillingAvailable {
+			billingAmount = strconv.FormatInt(log.BillingAmount, 10)
+			billingStatus = string(log.BillingStatus)
+		}
+		upstreamCost := ""
+		if log.CostAvailable {
+			upstreamCost = strconv.FormatInt(log.EstimatedCostMicros, 10)
+		}
+		_ = writer.Write([]string{startedAt.UTC().Format(time.RFC3339), log.UserDisplayName, log.UserAccount, log.ChannelName, log.Model, log.Capability, string(log.Status), strconv.Itoa(log.PollCount), strconv.FormatInt(log.DurationMs, 10), strconv.FormatInt(log.InputTokens, 10), strconv.FormatInt(log.OutputTokens, 10), strconv.FormatInt(log.CachedTokens, 10), billingAmount, billingStatus, upstreamCost, log.Currency, log.ErrorCode, log.Error})
 	}
 	writer.Flush()
 	if err := writer.Error(); err != nil {
@@ -914,15 +973,43 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 	if log.ProviderRequestID == "" {
 		log.ProviderRequestID = providerRequestIDFromPath(log.Path)
 	}
-	if len(responseBody) == 0 || !json.Valid(responseBody) {
+	payloads := providerResponsePayloads(responseBody)
+	for _, payload := range payloads {
+		s.enrichAPICallLogPayload(log, payload)
+	}
+	s.enrichAPICallLogFailureSummary(log, responseBody)
+}
+
+func (s *Service) enrichAPICallLogFailureSummary(log *model.ApiCallLog, responseBody []byte) {
+	if log.Status != model.ApiCallStatusFailed || log.StatusCode < 400 {
 		return
 	}
-	var payload map[string]any
-	if json.Unmarshal(responseBody, &payload) != nil {
+	userMessage := providerUserFacingErrorMessage(providerHTTPError{
+		StatusCode: log.StatusCode,
+		Body:       string(responseBody),
+	})
+	detail := strings.TrimSpace(log.Error)
+	if detail == "" || detail == userMessage {
+		log.Error = userMessage
 		return
 	}
+	if strings.Contains(detail, userMessage) {
+		return
+	}
+	log.Error = truncateRunes(userMessage+"；上游："+detail, 2_000)
+}
+
+func (s *Service) enrichAPICallLogPayload(log *model.ApiCallLog, payload map[string]any) {
 	if data, ok := payload["data"].(map[string]any); ok {
 		for key, value := range data {
+			if _, exists := payload[key]; !exists {
+				payload[key] = value
+			}
+		}
+	}
+	// Responses API 的终态 SSE 把实际响应（包括 usage）放在 response 字段中。
+	if response, ok := payload["response"].(map[string]any); ok {
+		for key, value := range response {
 			if _, exists := payload[key]; !exists {
 				payload[key] = value
 			}
@@ -937,9 +1024,25 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 	}
 	usage, _ := payload["usage"].(map[string]any)
 	if usage != nil {
-		log.UsageAvailable = true
-		log.InputTokens = firstInt64(usage, "input_tokens", "prompt_tokens")
-		log.OutputTokens = firstInt64(usage, "output_tokens", "completion_tokens")
+		inputTokens, inputAvailable := firstInt64Value(usage, "input_tokens", "prompt_tokens")
+		outputTokens, outputAvailable := firstInt64Value(usage, "output_tokens", "completion_tokens")
+		if inputAvailable {
+			log.InputTokens = inputTokens
+		}
+		if outputAvailable {
+			log.OutputTokens = outputTokens
+		}
+		if inputAvailable || outputAvailable {
+			log.UsageAvailable = true
+		}
+		// 火山方舟视频的输入 Token 恒为 0；查询任务以 completion_tokens 为实际用量，
+		// 兼容只返回 total_tokens 的同协议中转实现。
+		if log.Capability == "video" && strings.Contains(log.Path, "/contents/generations/tasks") {
+			if log.OutputTokens == 0 {
+				log.OutputTokens = firstInt64(usage, "total_tokens")
+			}
+			log.UsageAvailable = log.OutputTokens > 0
+		}
 		if details, ok := usage["input_tokens_details"].(map[string]any); ok {
 			log.CachedTokens = firstInt64(details, "cached_tokens")
 		}
@@ -948,9 +1051,17 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 		}
 	}
 	if usageMetadata, ok := payload["usageMetadata"].(map[string]any); ok {
-		log.UsageAvailable = true
-		log.InputTokens = firstInt64(usageMetadata, "promptTokenCount")
-		log.OutputTokens = firstInt64(usageMetadata, "candidatesTokenCount")
+		inputTokens, inputAvailable := firstInt64Value(usageMetadata, "promptTokenCount")
+		outputTokens, outputAvailable := firstInt64Value(usageMetadata, "candidatesTokenCount")
+		if inputAvailable {
+			log.InputTokens = inputTokens
+		}
+		if outputAvailable {
+			log.OutputTokens = outputTokens
+		}
+		if inputAvailable || outputAvailable {
+			log.UsageAvailable = true
+		}
 		log.CachedTokens = firstInt64(usageMetadata, "cachedContentTokenCount")
 	}
 	log.ProviderRequestID = firstNonEmpty(stringField(payload, "task_id"), stringField(payload, "id"), stringField(payload, "request_id"), stringField(payload, "name"), log.ProviderRequestID)
@@ -970,6 +1081,45 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 	}
 }
 
+func providerResponsePayloads(responseBody []byte) []map[string]any {
+	if len(responseBody) == 0 {
+		return nil
+	}
+	var payload map[string]any
+	if json.Unmarshal(responseBody, &payload) == nil {
+		return []map[string]any{payload}
+	}
+
+	// 流式文本的用量只出现在最后一个 SSE data 事件中，不能把整段响应当作 JSON。
+	result := make([]map[string]any, 0)
+	scanner := bufio.NewScanner(bytes.NewReader(responseBody))
+	scanner.Buffer(make([]byte, 64<<10), max(len(responseBody)+1, 64<<10))
+	dataLines := make([]string, 0, 1)
+	flush := func() {
+		raw := strings.TrimSpace(strings.Join(dataLines, "\n"))
+		dataLines = dataLines[:0]
+		if raw == "" || raw == "[DONE]" {
+			return
+		}
+		var event map[string]any
+		if json.Unmarshal([]byte(raw), &event) == nil {
+			result = append(result, event)
+		}
+	}
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	flush()
+	return result
+}
+
 func providerRequestIDFromPath(path string) string {
 	parts := strings.Split(strings.Trim(strings.TrimSpace(path), "/"), "/")
 	for index := len(parts) - 1; index >= 0; index-- {
@@ -986,20 +1136,27 @@ func providerRequestIDFromPath(path string) string {
 }
 
 func firstInt64(values map[string]any, keys ...string) int64 {
+	value, _ := firstInt64Value(values, keys...)
+	return value
+}
+
+func firstInt64Value(values map[string]any, keys ...string) (int64, bool) {
 	for _, key := range keys {
 		switch value := values[key].(type) {
 		case float64:
-			return int64(value)
+			return int64(value), true
 		case int64:
-			return value
+			return value, true
 		case json.Number:
-			parsed, _ := value.Int64()
-			return parsed
+			parsed, err := value.Int64()
+			return parsed, err == nil
 		}
 	}
-	return 0
+	return 0, false
 }
 
 func (s *Service) recordActivity(userID string, event string, count int) {
-	_ = s.repo.RecordUserActivity(userID, event, count, time.Now())
+	if err := s.repo.RecordUserActivity(userID, event, count, time.Now()); err != nil {
+		log.Printf("record user activity failed: event=%s count=%d error=%v", event, count, err)
+	}
 }

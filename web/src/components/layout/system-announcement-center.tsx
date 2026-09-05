@@ -1,13 +1,19 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Tag } from "antd";
 import { Bell } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useEffect, useState, type CSSProperties } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { AnnouncementTimelineModal } from "@/components/ui/aceternity/announcement-timeline-modal";
 import { aceternityMotion } from "@/lib/aceternity-motion";
-import { getAnnouncementFeed, markAnnouncementsRead, type SystemAnnouncement } from "@/services/api/announcements";
+import { getAnnouncementFeed, markAnnouncementsRead } from "@/services/api/announcements";
 
-const ANNOUNCEMENT_REFRESH_INTERVAL_MS = 60_000;
+const AnnouncementTimelineModal = lazy(() => import("@/components/ui/aceternity/announcement-timeline-modal").then((module) => ({ default: module.AnnouncementTimelineModal })));
+
+const ANNOUNCEMENT_REFRESH_INTERVAL_MS = 5 * 60_000;
+const ANNOUNCEMENT_CACHE_TTL_MS = 60_000;
+const ANNOUNCEMENT_DISMISS_TODAY_PREFIX = "yingce.announcements.dismiss-today";
+
+type AnnouncementFeed = Awaited<ReturnType<typeof getAnnouncementFeed>>;
 
 type SystemAnnouncementCenterProps = {
     userId: string;
@@ -16,70 +22,58 @@ type SystemAnnouncementCenterProps = {
     showLabel?: boolean;
     labelClassName?: string;
     staticMotion?: boolean;
+    autoOpen?: boolean;
 };
 
-export function SystemAnnouncementCenter({ userId, className, style, showLabel = false, labelClassName, staticMotion = false }: SystemAnnouncementCenterProps) {
+export function SystemAnnouncementCenter({ userId, className, style, showLabel = false, labelClassName, staticMotion = false, autoOpen = false }: SystemAnnouncementCenterProps) {
     const reducedMotion = useReducedMotion();
-    const activeUserIdRef = useRef(userId);
-    activeUserIdRef.current = userId;
+    const queryClient = useQueryClient();
     const [open, setOpen] = useState(false);
-    const [announcements, setAnnouncements] = useState<SystemAnnouncement[]>([]);
-    const [unreadCount, setUnreadCount] = useState(0);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState("");
-
-    const refresh = useCallback(async (showLoading = false) => {
-        if (!userId) return null;
-        const requestUserId = userId;
-        if (showLoading) setLoading(true);
-        try {
-            const feed = await getAnnouncementFeed();
-            if (activeUserIdRef.current !== requestUserId) return null;
-            setAnnouncements(feed.announcements || []);
-            setUnreadCount(Math.max(0, feed.unreadCount || 0));
-            setError("");
-            return feed;
-        } catch (requestError) {
-            if (activeUserIdRef.current !== requestUserId) return null;
-            setError(requestError instanceof Error ? requestError.message : "读取公告失败");
-            return null;
-        } finally {
-            if (showLoading && activeUserIdRef.current === requestUserId) setLoading(false);
-        }
-    }, [userId]);
+    const [automaticPrompt, setAutomaticPrompt] = useState(false);
+    const [dismissedFingerprint, setDismissedFingerprint] = useState("");
+    const queryKey = ["system-announcements", userId] as const;
+    const feedQuery = useQuery({
+        queryKey,
+        queryFn: getAnnouncementFeed,
+        enabled: Boolean(userId),
+        staleTime: ANNOUNCEMENT_CACHE_TTL_MS,
+        refetchInterval: ANNOUNCEMENT_REFRESH_INTERVAL_MS,
+        // 公告在打开面板时会显式 refetch；不把浏览器 focus 变成每个工作区实例的请求触发器。
+        refetchOnWindowFocus: false,
+    });
+    const announcements = feedQuery.data?.announcements || [];
+    const unreadCount = Math.max(0, feedQuery.data?.unreadCount || 0);
+    const error = feedQuery.error instanceof Error ? feedQuery.error.message : feedQuery.error ? "读取公告失败" : "";
 
     useEffect(() => {
-        setAnnouncements([]);
-        setUnreadCount(0);
-        setError("");
-        if (!userId) return;
-        void refresh();
-        const timer = window.setInterval(() => void refresh(), ANNOUNCEMENT_REFRESH_INTERVAL_MS);
-        const onFocus = () => void refresh();
-        const onVisibilityChange = () => {
-            if (document.visibilityState === "visible") void refresh();
-        };
-        window.addEventListener("focus", onFocus);
-        document.addEventListener("visibilitychange", onVisibilityChange);
-        return () => {
-            window.clearInterval(timer);
-            window.removeEventListener("focus", onFocus);
-            document.removeEventListener("visibilitychange", onVisibilityChange);
-        };
-    }, [refresh, userId]);
+        if (!autoOpen || open || !feedQuery.isSuccess || unreadCount <= 0 || announcements.length === 0) return;
+        const fingerprint = announcementFeedFingerprint(announcements);
+        if (!fingerprint || fingerprint === dismissedFingerprint || announcementAutoPromptSuppressed(userId)) return;
+        setAutomaticPrompt(true);
+        setOpen(true);
+    }, [announcements, autoOpen, dismissedFingerprint, feedQuery.isSuccess, open, unreadCount, userId]);
 
     const openAnnouncements = async () => {
+        setAutomaticPrompt(false);
         setOpen(true);
-        const feed = await refresh(announcements.length === 0);
+        const feed = (await feedQuery.refetch()).data;
         if (!feed?.unreadCount) return;
         try {
             const result = await markAnnouncementsRead(feed.announcements.map((announcement) => announcement.id));
             const nextUnreadCount = Math.max(0, result.unreadCount || 0);
-            setUnreadCount(nextUnreadCount);
-            if (nextUnreadCount > 0) void refresh();
+            queryClient.setQueryData<AnnouncementFeed>(queryKey, (current) => current ? { ...current, unreadCount: nextUnreadCount } : current);
+            if (nextUnreadCount > 0) void queryClient.invalidateQueries({ queryKey });
         } catch {
             // 已读状态是辅助读路径，失败时保留角标，下一次打开或轮询会继续尝试同步。
         }
+    };
+
+    const dismissAutomaticPrompt = (duration: "once" | "today") => {
+        const fingerprint = announcementFeedFingerprint(announcements);
+        if (fingerprint) setDismissedFingerprint(fingerprint);
+        if (duration === "today") rememberAnnouncementDismissalToday(userId);
+        setAutomaticPrompt(false);
+        setOpen(false);
     };
 
     return (
@@ -118,7 +112,49 @@ export function SystemAnnouncementCenter({ userId, className, style, showLabel =
                     </span>
                 ) : null}
             </motion.button>
-            <AnnouncementTimelineModal open={open} announcements={announcements} loading={loading} error={announcements.length ? "" : error} onClose={() => setOpen(false)} onRetry={() => void refresh(true)} />
+            {open ? (
+                <Suspense fallback={null}>
+                    <AnnouncementTimelineModal
+                        open
+                        announcements={announcements}
+                        loading={feedQuery.isFetching}
+                        error={announcements.length ? "" : error}
+                        automaticPrompt={automaticPrompt}
+                        onClose={() => dismissAutomaticPrompt("once")}
+                        onDismissOnce={() => dismissAutomaticPrompt("once")}
+                        onDismissToday={() => dismissAutomaticPrompt("today")}
+                        onRetry={() => void feedQuery.refetch()}
+                    />
+                </Suspense>
+            ) : null}
         </>
     );
+}
+
+function announcementFeedFingerprint(announcements: AnnouncementFeed["announcements"]) {
+    return announcements
+        .map((announcement) => `${announcement.id}:${announcement.publishedAt}`)
+        .sort()
+        .join("|");
+}
+
+function announcementAutoPromptSuppressed(userId: string) {
+    try {
+        return localStorage.getItem(`${ANNOUNCEMENT_DISMISS_TODAY_PREFIX}.${userId}`) === localDateKey();
+    } catch {
+        return false;
+    }
+}
+
+function rememberAnnouncementDismissalToday(userId: string) {
+    try {
+        localStorage.setItem(`${ANNOUNCEMENT_DISMISS_TODAY_PREFIX}.${userId}`, localDateKey());
+    } catch {
+        // 浏览器禁用存储时仍允许关闭弹窗，本次组件生命周期内不会重复打开。
+    }
+}
+
+function localDateKey() {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }

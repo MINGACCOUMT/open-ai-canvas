@@ -1,13 +1,24 @@
 import { maxModelInputCapacity, type ModelInputSummary } from "@/lib/model-selection";
+import { getNodeAcceptedInputKind, getNodeGenerationMode, getNodeInputKind } from "@/lib/canvas/node-registry";
 import type { AiConfig } from "@/stores/use-config-store";
-import { CanvasNodeType, type CanvasConnection, type CanvasGenerationMode, type CanvasNodeData } from "@/types/canvas";
+import { type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 
 type ConnectionCandidate = Pick<CanvasConnection, "fromNodeId" | "toNodeId">;
+type CanvasConnectionPolicyOptions = {
+    // 仅跳过参考素材数量上限，媒体类型不兼容仍然拒绝。
+    ignoreCapacity?: boolean;
+};
 
-export function canvasConnectionError(config: AiConfig, nodes: CanvasNodeData[], connections: CanvasConnection[], candidate: ConnectionCandidate) {
+export function canvasConnectionError(config: AiConfig, nodes: CanvasNodeData[], connections: CanvasConnection[], candidate: ConnectionCandidate, options: CanvasConnectionPolicyOptions = {}) {
     const target = nodes.find((node) => node.id === candidate.toNodeId);
     if (!target) return "找不到连线目标节点";
-    const mode = nodeGenerationMode(target);
+    const acceptedInputKind = getNodeAcceptedInputKind(target.type);
+    if (acceptedInputKind) {
+        const source = nodes.find((node) => node.id === candidate.fromNodeId);
+        const sourceKind = source ? getNodeInputKind(source.type) : undefined;
+        if (sourceKind !== acceptedInputKind) return `${acceptedInputKindLabel(acceptedInputKind)}节点只接受${acceptedInputKindLabel(acceptedInputKind)}输入`;
+    }
+    const mode = getNodeGenerationMode(target);
     if (!mode) return "";
     const input = connectionInputSummary(target.id, nodes, connections, candidate);
     const visualInputCount = input.imageCount + input.characterCount;
@@ -15,10 +26,10 @@ export function canvasConnectionError(config: AiConfig, nodes: CanvasNodeData[],
     if (mode === "image") {
         if (input.videoCount > 0) return "图片生成节点不能连接参考视频";
         if (input.audioCount > 0) return "图片生成节点不能连接参考音频";
-        return capacityError(config, mode, "image", visualInputCount, "参考图");
+        return options.ignoreCapacity ? "" : capacityError(config, mode, "image", visualInputCount, "参考图");
     }
     if (mode === "video") {
-        return capacityError(config, mode, "image", visualInputCount, "参考图") || capacityError(config, mode, "video", input.videoCount, "参考视频") || capacityError(config, mode, "audio", input.audioCount, "参考音频");
+        return options.ignoreCapacity ? "" : capacityError(config, mode, "image", visualInputCount, "参考图") || capacityError(config, mode, "video", input.videoCount, "参考视频") || capacityError(config, mode, "audio", input.audioCount, "参考音频");
     }
     if (mode === "text" && input.audioCount > 0) return "文本生成节点不能连接参考音频";
     if (mode === "audio" && input.characterCount > 1) return "角色配音一次只能连接一个角色卡";
@@ -26,28 +37,28 @@ export function canvasConnectionError(config: AiConfig, nodes: CanvasNodeData[],
     return "";
 }
 
+function acceptedInputKindLabel(kind: "image" | "video" | "audio" | "text") {
+    if (kind === "image") return "图片";
+    if (kind === "video") return "视频";
+    if (kind === "audio") return "音频";
+    return "文本";
+}
+
 export function connectionInputSummary(targetNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], candidate?: ConnectionCandidate): ModelInputSummary {
     const sourceIds = new Set([...connections, ...(candidate ? [{ id: "candidate", ...candidate }] : [])].filter((connection) => connection.toNodeId === targetNodeId).map((connection) => connection.fromNodeId));
     const input: ModelInputSummary = { textCount: 0, imageCount: 0, videoCount: 0, audioCount: 0, characterCount: 0 };
     sourceIds.forEach((sourceId) => {
         const source = nodes.find((node) => node.id === sourceId);
-        if (!source || source.type === CanvasNodeType.Config || source.type === CanvasNodeType.Frame) return;
+        if (!source) return;
+        // 生成配置与背板不是参考素材，不参与容量计数——这一步必须早于角色卡判定，
+        // 否则一个带角色元数据的配置/背板节点会被多算成角色。
+        const inputKind = getNodeInputKind(source.type);
+        if (!inputKind) return;
+        // 角色卡是跨类型覆盖：落在可计数类型上时改记为角色。
         if (source.metadata?.workflowKind === "character") input.characterCount += 1;
-        else if (source.type === CanvasNodeType.Image || source.type === CanvasNodeType.Drawing) input.imageCount += 1;
-        else if (source.type === CanvasNodeType.Video) input.videoCount += 1;
-        else if (source.type === CanvasNodeType.Audio) input.audioCount += 1;
-        else input.textCount += 1;
+        else input[`${inputKind}Count`] += 1;
     });
     return input;
-}
-
-function nodeGenerationMode(node: CanvasNodeData): CanvasGenerationMode | null {
-    if (node.type === CanvasNodeType.Config) return node.metadata?.generationMode || "image";
-    if (node.type === CanvasNodeType.Image) return "image";
-    if (node.type === CanvasNodeType.Video) return "video";
-    if (node.type === CanvasNodeType.Audio) return "audio";
-    if (node.type === CanvasNodeType.Text || node.type === CanvasNodeType.Script) return "text";
-    return null;
 }
 
 function capacityError(config: AiConfig, capability: "image" | "video", kind: "image" | "video" | "audio", count: number, label: string) {

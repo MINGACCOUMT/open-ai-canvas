@@ -1,12 +1,12 @@
 import type { ReactNode } from "react";
-import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, PencilLine, Scissors, SlidersHorizontal, Smile, Sparkles, Upload, ZoomIn } from "lucide-react";
+import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, PencilLine, Crop, SlidersHorizontal, Smile, Upload, Scaling } from "lucide-react";
 
 import type { CanvasNodeData } from "@/types/canvas";
+import type { NodeToolbarGroup } from "@/lib/canvas/tool-registry";
 
-export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "annotation" | "maskEdit" | "emotion" | "portraitTexture" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
-export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | "edit" | ImageNodeActionToolId;
+type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "annotation" | "maskEdit" | "emotion" | "portraitTexture" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
 
-export type ImageToolHandlers = {
+type ImageToolHandlers = {
     onUpload: (node: CanvasNodeData) => void;
     onToggleFreeResize: (node: CanvasNodeData) => void;
     onAnnotate: (node: CanvasNodeData) => void;
@@ -23,176 +23,157 @@ export type ImageToolHandlers = {
     onReversePrompt: (node: CanvasNodeData) => void;
 };
 
-export type ImageToolDefinition = {
+type ImageToolDefinition = {
     id: ImageNodeActionToolId;
-    defaultVisible: boolean;
-    panelLabel: string;
     label: string | ((node: CanvasNodeData) => string);
-    title: string | ((node: CanvasNodeData) => string);
     icon: (node: CanvasNodeData) => ReactNode;
+    group: NodeToolbarGroup;
+    order: number;
+    section?: string;
+    description?: string;
     active?: (node: CanvasNodeData) => boolean;
     run: (node: CanvasNodeData, handlers: ImageToolHandlers) => void;
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v13";
-
-const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download", "edit"];
-
-export const imageToolDefinitions: ImageToolDefinition[] = [
+const imageToolDefinitions: ImageToolDefinition[] = [
     {
         id: "copyPrompt",
-        defaultVisible: true,
-        panelLabel: "复制提示词",
+        section: "生成信息",
         label: "复制提示词",
-        title: "复制生成该图片的提示词",
         icon: () => <Copy className="size-3.5" />,
+        group: "more",
+        order: 50,
         run: (node, handlers) => handlers.onCopyPrompt(node),
     },
     {
         id: "reversePrompt",
-        defaultVisible: true,
-        panelLabel: "反推提示词",
+        section: "生成信息",
         label: "反推提示词",
-        title: "创建反推提示词的文本和配置节点",
         icon: () => <FileText className="size-3.5" />,
+        group: "more",
+        order: 60,
         run: (node, handlers) => handlers.onReversePrompt(node),
     },
     {
         id: "replace",
-        defaultVisible: true,
-        panelLabel: "替换图片",
         label: "替换图片",
-        title: "替换图片",
         icon: () => <Upload className="size-3.5" />,
+        group: "more",
+        section: "素材",
+        order: 45,
         run: (node, handlers) => handlers.onUpload(node),
     },
     {
         id: "resize",
-        defaultVisible: false,
-        panelLabel: "锁比例",
-        label: (node) => (node.metadata?.freeResize ? "自由比例" : "锁比例"),
-        title: (node) => (node.metadata?.freeResize ? "切换为等比缩放" : "切换为自由比例"),
+        label: "锁定宽高比",
+        section: "节点管理",
+        active: (node) => !node.metadata?.freeResize,
         icon: (node) => (node.metadata?.freeResize ? <LockOpen className="size-3.5" /> : <Lock className="size-3.5" />),
-        active: (node) => Boolean(node.metadata?.freeResize),
+        group: "more",
+        order: 70,
         run: (node, handlers) => handlers.onToggleFreeResize(node),
     },
     {
         id: "annotation",
-        defaultVisible: true,
-        panelLabel: "标注",
+        section: "拆分与标记",
+        description: "添加标记，另存为新图片",
         label: "标注",
-        title: "在图片上绘制标记并保存为新节点",
         icon: () => <PencilLine className="size-3.5" />,
+        group: "process",
+        order: 40,
         run: (node, handlers) => handlers.onAnnotate(node),
     },
     {
         id: "maskEdit",
-        defaultVisible: true,
-        panelLabel: "局部编辑",
-        label: "局部编辑",
-        title: "添加蒙版遮罩后局部修改",
+        label: "局部重绘",
+        description: "涂抹要修改的区域，生成新图片",
         icon: () => <Brush className="size-3.5" />,
+        group: "primary",
+        order: 10,
         run: (node, handlers) => handlers.onMaskEdit(node),
     },
     {
         id: "emotion",
-        defaultVisible: true,
-        panelLabel: "表情与情绪",
-        label: "情绪",
-        title: "调整人物表情与情绪",
+        label: "表情调整",
+        section: "人像调整",
+        description: "调整人物表情，生成新图片",
         icon: () => <Smile className="size-3.5" />,
+        group: "portrait",
+        order: 50,
         run: (node, handlers) => handlers.onEmotion(node),
     },
     {
         id: "portraitTexture",
-        defaultVisible: true,
-        panelLabel: "人物质感调节",
-        label: "人物质感",
-        title: "调节人景融合、光影、皮肤、纹理与锐度",
+        label: "质感调整",
+        section: "人像调整",
+        description: "设置肤质、光影与融合，再执行生成",
         icon: () => <SlidersHorizontal className="size-3.5" />,
+        group: "portrait",
+        order: 60,
         run: (node, handlers) => handlers.onPortraitTexture(node),
     },
     {
         id: "crop",
-        defaultVisible: true,
-        panelLabel: "剪裁",
-        label: "剪裁",
-        title: "剪裁并生成新节点",
-        icon: () => <Scissors className="size-3.5" />,
+        label: "裁剪",
+        section: "构图与尺寸",
+        description: "保留所选区域，生成新图片",
+        icon: () => <Crop className="size-3.5" />,
+        group: "process",
+        order: 10,
         run: (node, handlers) => handlers.onCrop(node),
     },
     {
         id: "split",
-        defaultVisible: true,
-        panelLabel: "切图",
-        label: "切图",
-        title: "按行列切分图片",
+        label: "宫格切分",
+        section: "拆分与标记",
+        description: "按行列拆成多个图片节点",
         icon: () => <Grid2x2 className="size-3.5" />,
+        group: "process",
+        order: 30,
         run: (node, handlers) => handlers.onSplit(node),
     },
     {
         id: "upscale",
-        defaultVisible: true,
-        panelLabel: "放大",
-        label: "放大",
-        title: "放大图片分辨率",
-        icon: () => <ZoomIn className="size-3.5" />,
+        label: "调整尺寸",
+        section: "构图与尺寸",
+        description: "插值放大像素尺寸，不是 AI 超分",
+        icon: () => <Scaling className="size-3.5" />,
+        group: "process",
+        order: 20,
         run: (node, handlers) => handlers.onUpscale(node),
     },
     {
-        id: "superResolve",
-        defaultVisible: false,
-        panelLabel: "超分",
-        label: "超分",
-        title: "AI 超分",
-        icon: () => <Sparkles className="size-3.5" />,
-        run: (node, handlers) => handlers.onSuperResolve(node),
-    },
-    {
         id: "angle",
-        defaultVisible: true,
-        panelLabel: "多视角",
-        label: "多视角",
-        title: "生成不同观察视角",
+        label: "多角度",
+        section: "视角",
+        description: "调整摄影机角度，生成新视角",
         icon: () => <Camera className="size-3.5" />,
+        group: "viewpoint",
+        order: 20,
         run: (node, handlers) => handlers.onAngle(node),
     },
     {
         id: "view",
-        defaultVisible: true,
-        panelLabel: "查看大图",
-        label: "查看大图",
-        title: "查看图片详情",
+        label: "预览",
         icon: () => <Maximize2 className="size-3.5" />,
+        group: "utility",
+        order: 10,
         run: (node, handlers) => handlers.onViewImage(node),
     },
 ];
-
-export const defaultImageQuickToolIds: ImageQuickToolId[] = ["info", "download", "maskEdit", "emotion", "portraitTexture", "crop", "angle"];
-
-export function isImageQuickToolId(value: string): value is ImageQuickToolId {
-    return defaultBaseToolIds.some((id) => id === value) || imageToolDefinitions.some((tool) => tool.id === value);
-}
 
 export function buildImageToolbarTools(node: CanvasNodeData, handlers: ImageToolHandlers) {
     return imageToolDefinitions.map((tool) => ({
         id: tool.id,
         label: resolveToolText(tool.label, node),
-        title: resolveToolText(tool.title, node),
         icon: tool.icon(node),
+        group: tool.group,
+        order: tool.order,
+        section: tool.section,
+        description: tool.description,
         active: tool.active?.(node),
         onClick: () => tool.run(node, handlers),
     }));
-}
-
-export function normalizeImageQuickToolIds(value: unknown[]) {
-    const allIds: ImageQuickToolId[] = [...defaultBaseToolIds, ...imageToolDefinitions.map((tool) => tool.id)];
-    const ids = new Set(allIds);
-    return allIds.filter((id) => value.includes(id) && ids.has(id));
-}
-
-export function readImageQuickToolsConfig(value: unknown): ImageQuickToolId[] {
-    return Array.isArray(value) ? normalizeImageQuickToolIds(value).slice(0, 7) : defaultImageQuickToolIds;
 }
 
 function resolveToolText(value: string | ((node: CanvasNodeData) => string), node: CanvasNodeData) {

@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -72,9 +73,10 @@ type AdminUserReference struct {
 }
 
 type AdminChannelReference struct {
-	ID     string   `json:"id"`
-	Name   string   `json:"name"`
-	Models []string `json:"models"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Enabled bool     `json:"enabled"`
+	Models  []string `json:"models"`
 }
 
 type AdminReferenceData struct {
@@ -85,6 +87,7 @@ type AdminReferenceData struct {
 type ChannelRequest struct {
 	Name                 string           `json:"name"`
 	BaseURL              string           `json:"baseUrl"`
+	AllowLocalChannel    *bool            `json:"allowLocalChannel"`
 	APIKey               string           `json:"apiKey"`
 	SecretKey            string           `json:"secretKey"`
 	ConcurrencyLimit     *int             `json:"concurrencyLimit"`
@@ -95,27 +98,29 @@ type ChannelRequest struct {
 }
 
 type PublicModelChannel struct {
-	ID               string                    `json:"id"`
-	UserID           string                    `json:"userId"`
-	Scope            model.ChannelScope        `json:"scope"`
-	Enabled          bool                      `json:"enabled"`
-	Name             string                    `json:"name"`
-	BaseURL          string                    `json:"baseUrl"`
-	APIKey           string                    `json:"apiKey"`
-	APIFormat        string                    `json:"apiFormat"`
-	ConcurrencyLimit int                       `json:"concurrencyLimit"`
-	Models           []string                  `json:"models"`
-	ModelCosts       []PublicChannelModelPrice `json:"modelCosts"`
-	Headers          []OutboundHeader          `json:"headers,omitempty"`
-	HasAPIKey        bool                      `json:"hasApiKey"`
-	HasSecretKey     bool                      `json:"hasSecretKey"`
-	CreatedAt        time.Time                 `json:"createdAt"`
-	UpdatedAt        time.Time                 `json:"updatedAt"`
+	ID                string                    `json:"id"`
+	UserID            string                    `json:"userId"`
+	Scope             model.ChannelScope        `json:"scope"`
+	Enabled           bool                      `json:"enabled"`
+	Name              string                    `json:"name"`
+	BaseURL           string                    `json:"baseUrl"`
+	AllowLocalChannel bool                      `json:"allowLocalChannel,omitempty"`
+	APIKey            string                    `json:"apiKey"`
+	APIFormat         string                    `json:"apiFormat"`
+	ConcurrencyLimit  int                       `json:"concurrencyLimit"`
+	Models            []string                  `json:"models"`
+	ModelCosts        []PublicChannelModelPrice `json:"modelCosts"`
+	Headers           []OutboundHeader          `json:"headers,omitempty"`
+	HasAPIKey         bool                      `json:"hasApiKey"`
+	HasSecretKey      bool                      `json:"hasSecretKey"`
+	CreatedAt         time.Time                 `json:"createdAt"`
+	UpdatedAt         time.Time                 `json:"updatedAt"`
 }
 
 type PublicChannelModelPrice struct {
 	Model                        string                     `json:"model"`
 	DisplayName                  string                     `json:"displayName"`
+	Icon                         string                     `json:"icon"`
 	Capability                   string                     `json:"capability"`
 	Protocol                     model.ChannelInterfaceType `json:"protocol"`
 	BillingMode                  string                     `json:"billingMode"`
@@ -185,7 +190,7 @@ func (s *Service) AdminReferences(actor *model.User) (*AdminReferenceData, error
 		result.Users = append(result.Users, AdminUserReference{ID: user.ID, Username: user.Username, DisplayName: user.DisplayName})
 	}
 	for _, channel := range channels {
-		items, itemErr := s.repo.ChannelModels(channel.ID, true)
+		items, itemErr := s.repo.ChannelModels(channel.ID, false)
 		if itemErr != nil {
 			return nil, itemErr
 		}
@@ -193,7 +198,7 @@ func (s *Service) AdminReferences(actor *model.User) (*AdminReferenceData, error
 		for _, item := range items {
 			models = append(models, item.ModelKey)
 		}
-		result.Channels = append(result.Channels, AdminChannelReference{ID: channel.ID, Name: channel.Name, Models: uniqueNonEmpty(models)})
+		result.Channels = append(result.Channels, AdminChannelReference{ID: channel.ID, Name: channel.Name, Enabled: channel.Enabled, Models: uniqueNonEmpty(models)})
 	}
 	return result, nil
 }
@@ -333,7 +338,9 @@ func (s *Service) UpdateUser(actor *model.User, userID string, req UpdateUserReq
 			return nil, err
 		}
 		user.PasswordHash = hash
-		_ = s.repo.DeleteUserAuthSessions(user.ID)
+		if err := s.repo.DeleteUserAuthSessions(user.ID); err != nil {
+			return nil, fmt.Errorf("清理旧登录会话失败，密码未更新：%w", err)
+		}
 	}
 	user.Role = nextRole
 	user.Status = nextStatus
@@ -502,7 +509,11 @@ func (s *Service) CreateSystemChannel(actor *model.User, req ChannelRequest) (*P
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	channel, err := channelFromRequest(req, model.ModelChannel{ID: newID(), UserID: actor.ID, Scope: model.ChannelScopeSystem, Enabled: true})
+	channelID, err := s.repo.NextPrefixedID("CHANNEL")
+	if err != nil {
+		return nil, err
+	}
+	channel, err := s.channelFromRequest(req, model.ModelChannel{ID: channelID, UserID: actor.ID, Scope: model.ChannelScopeSystem, Enabled: true})
 	if err != nil {
 		return nil, err
 	}
@@ -515,6 +526,7 @@ func (s *Service) CreateSystemChannel(actor *model.User, req ChannelRequest) (*P
 	if err := s.syncInitialChannelModels(&channel, req.Models); err != nil {
 		return nil, err
 	}
+	s.invalidateRouteCatalog()
 	items, err := s.repo.ChannelModels(channel.ID, true)
 	if err != nil {
 		return nil, err
@@ -535,7 +547,7 @@ func (s *Service) UpdateSystemChannel(actor *model.User, id string, req ChannelR
 		return nil, err
 	}
 	req = mergeChannelRequest(req, *channel)
-	next, err := channelFromRequest(req, *channel)
+	next, err := s.channelFromRequest(req, *channel)
 	if err != nil {
 		return nil, err
 	}
@@ -558,6 +570,7 @@ func (s *Service) UpdateSystemChannel(actor *model.User, id string, req ChannelR
 	if err := s.syncInitialChannelModels(&next, req.Models); err != nil {
 		return nil, err
 	}
+	s.invalidateRouteCatalog()
 	items, err := s.repo.ChannelModels(next.ID, true)
 	if err != nil {
 		return nil, err
@@ -609,6 +622,9 @@ func (s *Service) DeleteSystemChannel(actor *model.User, id string) error {
 	err = s.repo.DeleteSystemChannel(channel.ID)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return BadAuthRequest("系统渠道不存在或已删除")
+	}
+	if err == nil {
+		s.invalidateRouteCatalog()
 	}
 	return err
 }
@@ -726,6 +742,10 @@ func (s *Service) APICallLogs(actor *model.User, limit int) ([]model.ApiCallLog,
 }
 
 func channelFromRequest(req ChannelRequest, channel model.ModelChannel) (model.ModelChannel, error) {
+	return (&Service{}).channelFromRequest(req, channel)
+}
+
+func (s *Service) channelFromRequest(req ChannelRequest, channel model.ModelChannel) (model.ModelChannel, error) {
 	name := strings.TrimSpace(req.Name)
 	baseURL := strings.TrimSpace(req.BaseURL)
 	if name == "" {
@@ -734,8 +754,23 @@ func channelFromRequest(req ChannelRequest, channel model.ModelChannel) (model.M
 	if baseURL == "" {
 		return channel, BadAuthRequest("请填写 Base URL")
 	}
-	if _, err := ValidateOutboundURL(baseURL); err != nil {
-		return channel, err
+	requestedAllowLocal := channel.AllowLocalChannel
+	if req.AllowLocalChannel != nil {
+		requestedAllowLocal = *req.AllowLocalChannel
+	}
+	if requestedAllowLocal && !s.DesktopLocalChannelsEnabled() {
+		return channel, BadAuthRequest("当前后端未启用本机渠道")
+	}
+	// 启用/停用或只修改价格、模型等本地配置时，不应要求上游域名当前可解析。
+	// 只有 Base URL 或本机渠道开关实际变化时才做出站地址校验。
+	connectionChanged := strings.TrimRight(baseURL, "/") != strings.TrimRight(channel.BaseURL, "/")
+	if req.AllowLocalChannel != nil {
+		connectionChanged = connectionChanged || *req.AllowLocalChannel != channel.AllowLocalChannel
+	}
+	if connectionChanged {
+		if _, err := s.validateChannelOutboundURL(baseURL, requestedAllowLocal, false); err != nil {
+			return channel, err
+		}
 	}
 	models := uniqueNonEmpty(req.Models)
 	modelsJSON, _ := json.Marshal(models)
@@ -745,6 +780,7 @@ func channelFromRequest(req ChannelRequest, channel model.ModelChannel) (model.M
 	}
 	channel.Name = name
 	channel.BaseURL = strings.TrimRight(baseURL, "/")
+	channel.AllowLocalChannel = requestedAllowLocal
 	if req.APIKey != "" {
 		channel.APIKey = req.APIKey
 	}
@@ -784,16 +820,11 @@ func mergeChannelRequest(req ChannelRequest, channel model.ModelChannel) Channel
 	if req.Headers == nil {
 		req.Headers, _ = ParseOutboundHeadersJSON(channel.HeadersJSON)
 	}
-	return req
-}
-
-func validChannelInterfaceType(value model.ChannelInterfaceType) bool {
-	switch value {
-	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceXAIImage, model.ChannelInterfaceGrokImage, model.ChannelInterfaceVolcengineArkImage, model.ChannelInterfaceVolcengineJiMengImage, model.ChannelInterfaceOpenAIAudio, model.ChannelInterfaceAsyncAudio, model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceVolcengineArkVideo, model.ChannelInterfaceVolcengineJiMengVideo, model.ChannelInterfaceGeminiVeo:
-		return true
-	default:
-		return false
+	if req.AllowLocalChannel == nil {
+		value := channel.AllowLocalChannel
+		req.AllowLocalChannel = &value
 	}
+	return req
 }
 
 func publicChannel(channel model.ModelChannel, admin bool, channelModels []model.ChannelModel) PublicModelChannel {
@@ -805,8 +836,13 @@ func publicChannel(channel model.ModelChannel, admin bool, channelModels []model
 		}
 		models = append(models, item.ModelKey)
 		if item.Enabled && item.PriceConfigured {
-			capabilityConfig, _ := DecodeModelCapabilityConfig(item.CapabilityConfigJSON)
-			modelCosts = append(modelCosts, PublicChannelModelPrice{Model: item.ModelKey, DisplayName: item.DisplayName, Capability: item.Capability, Protocol: item.Protocol, BillingMode: item.BillingMode, UnitPriceMicrocredits: item.UnitPriceMicrocredits, InputTokenPriceMicrocredits: item.InputTokenPriceMicrocredits, OutputTokenPriceMicrocredits: item.OutputTokenPriceMicrocredits, CachedTokenPriceMicrocredits: item.CachedTokenPriceMicrocredits, CapabilityConfig: capabilityConfig})
+			capabilityConfig, decodeErr := DecodeModelCapabilityConfig(item.CapabilityConfigJSON)
+			if decodeErr == nil && capabilityConfig != nil {
+				if normalized, normalizeErr := NormalizeModelCapabilityConfigForModel(item.Capability, string(item.Protocol), firstNonEmpty(item.ProviderModelKey, item.ModelKey), capabilityConfig); normalizeErr == nil {
+					capabilityConfig = normalized
+				}
+			}
+			modelCosts = append(modelCosts, PublicChannelModelPrice{Model: item.ModelKey, DisplayName: item.DisplayName, Icon: item.Icon, Capability: item.Capability, Protocol: item.Protocol, BillingMode: item.BillingMode, UnitPriceMicrocredits: item.UnitPriceMicrocredits, InputTokenPriceMicrocredits: item.InputTokenPriceMicrocredits, OutputTokenPriceMicrocredits: item.OutputTokenPriceMicrocredits, CachedTokenPriceMicrocredits: item.CachedTokenPriceMicrocredits, CapabilityConfig: capabilityConfig})
 		}
 	}
 	if len(models) == 0 {
@@ -827,22 +863,23 @@ func publicChannel(channel model.ModelChannel, admin bool, channelModels []model
 		apiKey = channel.APIKey
 	}
 	return PublicModelChannel{
-		ID:               channel.ID,
-		UserID:           channel.UserID,
-		Scope:            channel.Scope,
-		Enabled:          channel.Enabled,
-		Name:             channel.Name,
-		BaseURL:          baseURL,
-		APIKey:           apiKey,
-		APIFormat:        channel.APIFormat,
-		ConcurrencyLimit: channel.ConcurrencyLimit,
-		Models:           models,
-		ModelCosts:       modelCosts,
-		Headers:          headers,
-		HasAPIKey:        strings.TrimSpace(channel.APIKey) != "",
-		HasSecretKey:     strings.TrimSpace(channel.SecretKey) != "",
-		CreatedAt:        channel.CreatedAt,
-		UpdatedAt:        channel.UpdatedAt,
+		ID:                channel.ID,
+		UserID:            channel.UserID,
+		Scope:             channel.Scope,
+		Enabled:           channel.Enabled,
+		Name:              channel.Name,
+		BaseURL:           baseURL,
+		AllowLocalChannel: admin && channel.AllowLocalChannel,
+		APIKey:            apiKey,
+		APIFormat:         channel.APIFormat,
+		ConcurrencyLimit:  channel.ConcurrencyLimit,
+		Models:            models,
+		ModelCosts:        modelCosts,
+		Headers:           headers,
+		HasAPIKey:         strings.TrimSpace(channel.APIKey) != "",
+		HasSecretKey:      strings.TrimSpace(channel.SecretKey) != "",
+		CreatedAt:         channel.CreatedAt,
+		UpdatedAt:         channel.UpdatedAt,
 	}
 }
 

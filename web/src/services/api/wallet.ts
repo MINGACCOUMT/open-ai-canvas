@@ -14,11 +14,12 @@ export type CreditAccount = {
 export type CreditLedgerEntry = {
     id: string;
     userId: string;
-    type: "redeem" | "admin_grant" | "consume" | "refund" | "admin_adjustment" | "signup_bonus" | "checkin_bonus";
+    type: "redeem" | "payment_topup" | "admin_grant" | "consume" | "refund" | "admin_adjustment" | "signup_bonus" | "checkin_bonus";
     amountMicrocredits: number;
     availableAfterMicrocredits: number;
     reservedAfterMicrocredits: number;
     billingOrderId?: string;
+    paymentOrderId?: string;
     model?: string;
     channelId?: string;
     scene?: string;
@@ -50,7 +51,9 @@ export type ChannelModel = {
     id: string;
     channelId: string;
     modelKey: string;
+    providerModelKey: string;
     displayName: string;
+    icon: string;
     capability: "text" | "image" | "video" | "audio" | "";
     protocol?: import("@/lib/model-protocols").ModelProtocol;
     billingMode: "fixed_request" | "per_second" | "token";
@@ -63,8 +66,48 @@ export type ChannelModel = {
     priceVersion: number;
     capabilityVersion?: number;
     capabilityConfig?: import("@/lib/model-capabilities").ModelCapabilityConfig;
+    priceTiers: ChannelModelPriceTier[];
     createdAt: string;
     updatedAt: string;
+};
+
+export type ChannelModelPriceTier = {
+    id: string;
+    channelModelId: string;
+    selector: Record<string, string>;
+    selectorKey: string;
+    resolution: string;
+    videoSeconds: number;
+    providerModelKey: string;
+    billingMode: "fixed_request" | "per_second" | "token";
+    unitPriceMicrocredits: number;
+    inputTokenPriceMicrocredits: number;
+    outputTokenPriceMicrocredits: number;
+    cachedTokenPriceMicrocredits: number;
+    priceConfigured: boolean;
+    enabled: boolean;
+    priceVersion: number;
+    createdAt: string;
+    updatedAt: string;
+};
+
+// 系统渠道模型的写入合同。标量价格只用于兼容旧管理请求；新的后台界面只提交 priceTiers。
+export type ChannelModelMutation = {
+    modelKey: string;
+    providerModelKey?: string;
+    displayName?: string;
+    icon?: string;
+    capability: ChannelModel["capability"];
+    protocol?: ChannelModel["protocol"];
+    enabled?: boolean;
+    capabilityConfig?: ChannelModel["capabilityConfig"];
+    priceTiers?: Array<Omit<ChannelModelPriceTier, "id" | "channelModelId" | "selectorKey" | "priceVersion" | "createdAt" | "updatedAt">>;
+    billingMode?: ChannelModel["billingMode"];
+    unitPriceMicrocredits?: number;
+    inputTokenPriceMicrocredits?: number;
+    outputTokenPriceMicrocredits?: number;
+    cachedTokenPriceMicrocredits?: number;
+    priceConfigured?: boolean;
 };
 
 export type LinuxDOSetting = {
@@ -102,7 +145,9 @@ export type EmailSetting = {
     encryption: "starttls" | "tls" | "none";
     fromEmail: string;
     fromName: string;
+    fromNameInherited: boolean;
     hasPassword: boolean;
+    registrationAllowedDomains: string[];
     updatedBy?: string;
     createdAt?: string;
     updatedAt?: string;
@@ -225,25 +270,29 @@ export function listAdminChannelModels(channelId: string) {
     return request<{ models: ChannelModel[] }>(api.get(`/admin/channels/${encodeURIComponent(channelId)}/models`));
 }
 
-// 管理员从上游拉取模型目录；服务端只导入缺失项，价格和启用仍需人工确认。
+// 管理员从上游读取模型目录；确认导入后才会写入渠道模型，价格和启用仍需人工确认。
 export function fetchAdminChannelModels(channelId: string) {
-    return request<{ models: string[]; added: number }>(api.post(`/admin/channels/${encodeURIComponent(channelId)}/models/fetch`));
+	return request<{ models: string[] }>(api.post(`/admin/channels/${encodeURIComponent(channelId)}/models/fetch`));
 }
 
-export function testAdminChannelModel(channelId: string, input: Pick<ChannelModel, "modelKey" | "capability" | "protocol"> & { capabilityConfig?: ChannelModel["capabilityConfig"] }) {
+export function importAdminChannelModels(channelId: string, models: string[]) {
+	return request<{ models: string[]; added: number }>(api.post(`/admin/channels/${encodeURIComponent(channelId)}/models/import`, { models }));
+}
+
+export function testAdminChannelModel(channelId: string, input: Pick<ChannelModel, "modelKey" | "providerModelKey" | "capability" | "protocol"> & { capabilityConfig?: ChannelModel["capabilityConfig"] }) {
     return request<{ durationMs: number }>(api.post(`/admin/channels/${encodeURIComponent(channelId)}/models/test`, input, { timeout: 10 * 60 * 1000 }));
 }
 
-export function createAdminChannelModel(channelId: string, input: Omit<ChannelModel, "id" | "channelId" | "priceVersion" | "createdAt" | "updatedAt">) {
+export function createAdminChannelModel(channelId: string, input: ChannelModelMutation) {
     return request<{ model: ChannelModel }>(api.post(`/admin/channels/${encodeURIComponent(channelId)}/models`, input));
 }
 
-export function updateAdminChannelModel(channelId: string, id: string, input: Omit<ChannelModel, "id" | "channelId" | "priceVersion" | "createdAt" | "updatedAt">) {
+export function updateAdminChannelModel(channelId: string, id: string, input: ChannelModelMutation) {
     return request<{ model: ChannelModel }>(api.patch(`/admin/channels/${encodeURIComponent(channelId)}/models/${encodeURIComponent(id)}`, input));
 }
 
 export function deleteAdminChannelModel(channelId: string, id: string) {
-	return request<{ ok: boolean }>(api.delete(`/admin/channels/${encodeURIComponent(channelId)}/models/${encodeURIComponent(id)}`));
+    return request<{ ok: boolean }>(api.delete(`/admin/channels/${encodeURIComponent(channelId)}/models/${encodeURIComponent(id)}`));
 }
 
 export type AdminFinanceListParams = { keyword?: string; status?: string; validity?: string; page?: number; limit?: number };

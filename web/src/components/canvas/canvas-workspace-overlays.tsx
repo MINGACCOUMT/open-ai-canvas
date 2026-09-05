@@ -1,11 +1,12 @@
 import { motion, useReducedMotion } from "motion/react";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
-import { ChevronRight, Clapperboard, Image as ImageIcon, List, Music2, Pencil, Video, WandSparkles, X } from "lucide-react";
+import { ChevronRight, Clapperboard, Image as ImageIcon, List, Music2, Pencil, Video, WandSparkles, Workflow as WorkflowIcon, X } from "lucide-react";
 
 import { SpotlightSurface } from "@/components/ui/aceternity/spotlight-surface";
+import { useCanvasOverlayLayer } from "@/components/canvas/canvas-overlay-layer";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { aceternityMotion } from "@/lib/aceternity-motion";
-import { subscribeCanvasViewportPreview } from "@/lib/canvas/canvas-live-viewport";
+import { subscribeCanvasGraphicsViewportPreview, subscribeCanvasViewportPreview } from "@/lib/canvas/canvas-live-viewport";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData, type ConnectionHandle, type Position, type ViewportTransform } from "@/types/canvas";
 
@@ -13,6 +14,7 @@ export type PendingConnectionCreate = {
     connection: ConnectionHandle;
     position: Position;
     quick?: boolean;
+    batchSourceNodeIds?: string[];
 };
 
 export function CanvasSelectionToolbar({ anchorRef, containerRef, count, children }: { anchorRef: RefObject<HTMLDivElement | null>; containerRef: RefObject<HTMLDivElement | null>; count: number; children: ReactNode }) {
@@ -79,44 +81,66 @@ export function CanvasSelectionToolbar({ anchorRef, containerRef, count, childre
             onPointerDown={(event) => event.stopPropagation()}
         >
             <motion.div initial={reducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.9, y: anchor.placement === "above" ? 8 : -8 }} animate={{ opacity: 1, scale: 1, y: 0 }} transition={aceternityMotion.spring.panel} className="flex items-center gap-2">
-                <span className="aceternity-floating-panel shrink-0 rounded-full border px-2.5 py-1.5 text-[var(--fs-tiny)] font-semibold tabular-nums backdrop-blur-2xl" style={{ background: theme.spatial.elevated, borderColor: theme.spatial.glowStrong, color: theme.accent.primary, boxShadow: `0 14px 36px ${theme.spatial.shadow}` }}>已选 {count}</span>
+                <span className="aceternity-floating-panel shrink-0 rounded-full border px-2.5 py-1.5 text-[var(--fs-tiny)] font-semibold tabular-nums backdrop-blur-2xl" style={{ background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.accent.primary }}>已选 {count}</span>
                 <div className="max-w-[min(560px,calc(100vw-90px))]">{children}</div>
             </motion.div>
         </div>
     );
 }
 
-export function CanvasNodePanelOverlay({ node, viewport, containerRef, panelWidth = 520, panelHeight = 420, children }: { node: CanvasNodeData; viewport: ViewportTransform; containerRef: RefObject<HTMLDivElement | null>; panelWidth?: number; panelHeight?: number; children: ReactNode }) {
+export function CanvasNodePanelOverlay({ node, viewport, containerRef, panelWidth, panelHeight = 190, dragOffset, isDragging = false, children }: { node: CanvasNodeData; viewport: ViewportTransform; containerRef: RefObject<HTMLDivElement | null>; panelWidth?: number; panelHeight?: number; dragOffset?: Position | null; isDragging?: boolean; children: ReactNode }) {
     const panelRef = useRef<HTMLDivElement>(null);
-    const initialPosition = getNodePanelPosition(node, viewport, { width: containerRef.current?.clientWidth || 0, height: containerRef.current?.clientHeight || 0 }, panelWidth, panelHeight);
+    const { bringToFront, zIndex } = useCanvasOverlayLayer(`node-panel:${node.id}`, "var(--z-modal-overlay)");
+    const initialWidth = resolveNodePanelWidth(node, viewport, panelWidth);
+    const initialPosition = getNodePanelPosition(node, viewport, { width: containerRef.current?.clientWidth || 0, height: containerRef.current?.clientHeight || 0 }, initialWidth, panelHeight, dragOffset);
+
+    useLayoutEffect(() => {
+        bringToFront();
+    }, [bringToFront]);
 
     useLayoutEffect(() => {
         const container = containerRef.current;
         const panel = panelRef.current;
         if (!container || !panel) return;
+        let liveViewport = viewport;
+        let viewportSize = { width: container.clientWidth, height: container.clientHeight };
         const update = (nextViewport: ViewportTransform) => {
-            const position = getNodePanelPosition(node, nextViewport, { width: container.clientWidth, height: container.clientHeight }, panel.offsetWidth || panelWidth, panel.offsetHeight || panelHeight);
-            panel.style.left = `${position.left}px`;
-            panel.style.top = `${position.top}px`;
+            liveViewport = nextViewport;
+            const nextWidth = resolveNodePanelWidth(node, nextViewport, panelWidth);
+            panel.style.width = `${nextWidth}px`;
+            const position = getNodePanelPosition(
+                node,
+                nextViewport,
+                viewportSize,
+                nextWidth,
+                panelHeight,
+                dragOffset,
+            );
+            panel.style.transform = `translate3d(${position.left}px, ${position.top}px, 0)`;
         };
         update(viewport);
-        const resizeObserver = new ResizeObserver(() => update(viewport));
+        const resizeObserver = new ResizeObserver(() => {
+            viewportSize = { width: container.clientWidth, height: container.clientHeight };
+            update(liveViewport);
+        });
         resizeObserver.observe(container);
-        resizeObserver.observe(panel);
-        const unsubscribeViewport = subscribeCanvasViewportPreview(container, update);
+        const unsubscribeViewport = subscribeCanvasGraphicsViewportPreview(container, update);
         return () => {
             resizeObserver.disconnect();
             unsubscribeViewport();
         };
-    }, [containerRef, node.height, node.id, node.position.x, node.position.y, node.width, panelHeight, panelWidth, viewport]);
+    }, [containerRef, dragOffset?.x, dragOffset?.y, isDragging, node.height, node.id, node.position.x, node.position.y, node.width, panelHeight, panelWidth, viewport]);
 
     return (
         <div
             ref={panelRef}
             data-canvas-no-zoom
-            className="thin-scrollbar absolute z-[var(--z-modal-overlay)] max-w-[calc(100%_-_24px)] overflow-y-auto"
-            style={{ left: initialPosition.left, top: initialPosition.top, width: panelWidth, maxHeight: "calc(100% - 84px)" }}
+            data-canvas-node-panel
+            className="thin-scrollbar absolute max-w-[calc(100%_-_24px)] overflow-y-auto"
+            style={{ left: 0, top: 0, transform: `translate3d(${initialPosition.left}px, ${initialPosition.top}px, 0)`, width: initialWidth, maxHeight: "calc(100% - 84px)", zIndex }}
             onMouseDown={(event) => event.stopPropagation()}
+            onPointerDownCapture={bringToFront}
+            onFocusCapture={bringToFront}
             onPointerDown={(event) => event.stopPropagation()}
         >
             {children}
@@ -124,14 +148,24 @@ export function CanvasNodePanelOverlay({ node, viewport, containerRef, panelWidt
     );
 }
 
-export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, containerRef, canCreateDrawing, getDisabledReason, onCreate, onClose }: { pending: PendingConnectionCreate; viewport: ViewportTransform; viewportSize: { width: number; height: number }; containerRef: RefObject<HTMLDivElement | null>; canCreateDrawing: boolean; getDisabledReason: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Script | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Drawing) => string; onCreate: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Script | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Drawing) => void; onClose: () => void }) {
+function resolveNodePanelWidth(node: CanvasNodeData, viewport: ViewportTransform, requestedWidth?: number) {
+    if (requestedWidth) return requestedWidth;
+    return clamp(Math.round(node.width * viewport.k * 1.5), 680, 920);
+}
+
+export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, containerRef, canCreateDrawing, getDisabledReason, onCreate, onClose }: { pending: PendingConnectionCreate; viewport: ViewportTransform; viewportSize: { width: number; height: number }; containerRef: RefObject<HTMLDivElement | null>; canCreateDrawing: boolean; getDisabledReason: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Script | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Drawing | CanvasNodeType.Config, provider?: "runninghub" | "comfyui") => string; onCreate: (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Script | CanvasNodeType.Video | CanvasNodeType.Audio | CanvasNodeType.Drawing | CanvasNodeType.Config, provider?: "runninghub" | "comfyui") => void; onClose: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const reducedMotion = useReducedMotion();
     const menuRef = useRef<HTMLDivElement>(null);
+    const { bringToFront, zIndex } = useCanvasOverlayLayer("connection-create-menu", "var(--z-modal-overlay)");
     const menuWidth = 248;
-    const menuHeight = canCreateDrawing ? 420 : 376;
+    const menuHeight = canCreateDrawing ? 456 : 412;
     const gap = 12;
     const initialPosition = getConnectionMenuPosition(pending.position, viewport, viewportSize, menuWidth, menuHeight, gap);
+
+    useLayoutEffect(() => {
+        bringToFront();
+    }, [bringToFront]);
 
     useLayoutEffect(() => {
         const container = containerRef.current;
@@ -154,18 +188,20 @@ export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, co
             initial={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 6, scale: 0.97, rotateX: 2 }}
             animate={{ opacity: 1, y: 0, scale: 1, rotateX: 0 }}
             transition={{ duration: aceternityMotion.duration.instant, ease: aceternityMotion.easing.enter }}
-            className="aceternity-floating-panel absolute z-[var(--z-modal-overlay)] w-[248px] origin-top-left overflow-hidden rounded-[var(--r-2xl)] border p-2 backdrop-blur-2xl"
+            className="aceternity-floating-panel absolute w-[248px] origin-top-left overflow-hidden rounded-[var(--r-2xl)] border p-2 backdrop-blur-2xl"
             data-canvas-no-zoom
             data-connection-create-menu
-            style={{ left: initialPosition.left, top: initialPosition.top, background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text, boxShadow: `0 30px 90px ${theme.spatial.shadow}` }}
+            style={{ left: initialPosition.left, top: initialPosition.top, zIndex, background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
+            onPointerDownCapture={bringToFront}
+            onFocusCapture={bringToFront}
             onPointerDown={(event) => event.stopPropagation()}
         >
             <div className="absolute inset-x-8 top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${theme.toolbar.border}, transparent)` }} />
             <div className="mb-1.5 flex items-center justify-between gap-2 px-1 py-0.5">
                 <span className="flex min-w-0 items-center gap-2">
                     <span className="grid size-8 shrink-0 place-items-center rounded-[var(--dock-item-radius)] border opacity-75" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }}><WandSparkles className="size-3.5" /></span>
-                    <span className="min-w-0"><span className="block truncate text-[var(--fs-label)] font-semibold">创建下一步</span><span className="mt-0.5 block truncate text-[var(--fs-micro)]" style={{ color: theme.node.muted }}>引用当前节点</span></span>
+                    <span className="min-w-0"><span className="block truncate text-[var(--fs-label)] font-semibold">创建下一步</span><span className="mt-0.5 block truncate text-[var(--fs-micro)]" style={{ color: theme.node.muted }}>{pending.batchSourceNodeIds?.length ? `引用已选 ${pending.batchSourceNodeIds.length} 个节点` : "引用当前节点"}</span></span>
                 </span>
                 <button type="button" className="grid size-6 shrink-0 place-items-center rounded-full border opacity-55 transition-opacity hover:opacity-100" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }} onClick={onClose} aria-label="关闭连线创建菜单"><X className="size-3" /></button>
             </div>
@@ -173,6 +209,7 @@ export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, co
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<List className="size-4" />} title="文本生成" disabledReason={getDisabledReason(CanvasNodeType.Text)} onClick={() => onCreate(CanvasNodeType.Text)} />
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Clapperboard className="size-4" />} title="分镜脚本" disabledReason={getDisabledReason(CanvasNodeType.Script)} onClick={() => onCreate(CanvasNodeType.Script)} />
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<ImageIcon className="size-4" />} title="图片生成" disabledReason={getDisabledReason(CanvasNodeType.Image)} onClick={() => onCreate(CanvasNodeType.Image)} />
+                <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<WorkflowIcon className="size-4" />} title="生成配置" description="选择模型，或使用已启用的工作流插件" disabledReason={getDisabledReason(CanvasNodeType.Config)} onClick={() => onCreate(CanvasNodeType.Config)} />
                 {canCreateDrawing ? <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Pencil className="size-4" />} title="绘图" disabledReason={getDisabledReason(CanvasNodeType.Drawing)} onClick={() => onCreate(CanvasNodeType.Drawing)} /> : null}
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Video className="size-4" />} title="视频生成" disabledReason={getDisabledReason(CanvasNodeType.Video)} onClick={() => onCreate(CanvasNodeType.Video)} />
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Music2 className="size-4" />} title="音频参考" disabledReason={getDisabledReason(CanvasNodeType.Audio)} onClick={() => onCreate(CanvasNodeType.Audio)} />
@@ -208,20 +245,18 @@ function getConnectionMenuPosition(position: Position, viewport: ViewportTransfo
     };
 }
 
-function getNodePanelPosition(node: CanvasNodeData, viewport: ViewportTransform, viewportSize: { width: number; height: number }, panelWidth: number, panelHeight: number) {
+export function getNodePanelPosition(node: CanvasNodeData, viewport: ViewportTransform, viewportSize: { width: number; height: number }, panelWidth: number, _panelHeight: number, dragOffset?: Position | null) {
     const gap = 10;
     const margin = 12;
-    const topBoundary = 72;
-    const nodeCenterX = viewport.x + (node.position.x + node.width / 2) * viewport.k;
-    const nodeTop = viewport.y + node.position.y * viewport.k;
-    const nodeBottom = viewport.y + (node.position.y + node.height) * viewport.k;
+    const offsetX = dragOffset?.x || 0;
+    const offsetY = dragOffset?.y || 0;
+    const nodeCenterX = viewport.x + (node.position.x + offsetX + node.width / 2) * viewport.k;
+    const nodeBottom = viewport.y + (node.position.y + offsetY + node.height) * viewport.k;
     const maxLeft = Math.max(margin, viewportSize.width - panelWidth - margin);
     const left = clamp(nodeCenterX - panelWidth / 2, margin, maxLeft);
-    const belowTop = nodeBottom + gap;
-    const aboveTop = nodeTop - panelHeight - gap;
-    const preferredTop = belowTop + panelHeight <= viewportSize.height - margin ? belowTop : aboveTop;
     return {
         left,
-        top: clamp(preferredTop, topBoundary, Math.max(topBoundary, viewportSize.height - panelHeight - margin)),
+        top: nodeBottom + gap,
+        placement: "below" as const,
     };
 }

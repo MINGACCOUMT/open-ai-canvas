@@ -1,16 +1,81 @@
 import type { UploadedFile } from "@/services/file-storage";
 import type { UploadedImage } from "@/services/image-storage";
-import type { Asset, ImageAsset, NewAsset } from "@/stores/use-asset-store";
+import { canvasVideoAssetPreviewUrl } from "@/lib/canvas/canvas-media-preview";
+import { resolveResourceUrl } from "@/services/api/resources";
+import type { ExternalAssetPickerReference } from "@/lib/plugins/plugin-types";
+import type { Asset, AudioAsset, ImageAsset, NewAsset } from "@/stores/use-asset-store";
 import type { ReferenceImage } from "@/types/image";
-import type { ReferenceVideo } from "@/types/media";
+import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
-export type CreationAttachment = (ReferenceImage | ReferenceVideo) & { previewUrl: string };
+export type CreationDocumentAttachment = {
+    id: string;
+    name: string;
+    type: string;
+    url: string;
+    storageKey: string;
+    bytes: number;
+    previewUrl: string;
+};
+export type CreationAttachment = ((ReferenceImage | ReferenceVideo | ReferenceAudio) & { previewUrl: string }) | CreationDocumentAttachment;
+export type CreationMode = "text" | "image" | "video";
+export type CreationAttachmentKind = "image" | "video" | "audio" | "file";
+
+const textDocumentExtensions = [".pdf", ".txt", ".md", ".csv", ".json", ".html", ".xml", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"];
 
 export type CreationAssetIdentity = {
     taskId?: string;
     messageId?: string;
     resultIndex?: number;
 };
+
+export function creationUploadAccept(mode: CreationMode) {
+    if (mode === "video") return "image/*,video/*,audio/*";
+    if (mode === "text") return `image/*,video/*,audio/*,${textDocumentExtensions.join(",")}`;
+    return "image/*";
+}
+
+export function creationFileAccepted(mode: CreationMode, file: Pick<File, "type" | "name">) {
+    if (file.type.startsWith("image/")) return true;
+    if (mode === "video") return file.type.startsWith("video/") || file.type.startsWith("audio/");
+    if (mode !== "text") return false;
+    const name = file.name.toLowerCase();
+    return file.type.startsWith("video/") || file.type.startsWith("audio/") || file.type.startsWith("text/") || textDocumentExtensions.some((extension) => name.endsWith(extension));
+}
+
+export function creationAttachmentKind(attachment: Pick<CreationAttachment, "type">): CreationAttachmentKind {
+    if (attachment.type.startsWith("video/")) return "video";
+    if (attachment.type.startsWith("audio/")) return "audio";
+    if (attachment.type.startsWith("image/")) return "image";
+    return "file";
+}
+
+export function splitCreationAttachments(attachments: CreationAttachment[]) {
+    return {
+        referenceImages: attachments.filter((attachment): attachment is CreationAttachment & ReferenceImage => creationAttachmentKind(attachment) === "image"),
+        referenceVideos: attachments.filter((attachment): attachment is CreationAttachment & ReferenceVideo => creationAttachmentKind(attachment) === "video"),
+        referenceAudios: attachments.filter((attachment): attachment is CreationAttachment & ReferenceAudio => creationAttachmentKind(attachment) === "audio"),
+    };
+}
+
+export function creationAttachmentPreview(attachment: CreationAttachment): { kind: CreationAttachmentKind; url: string } {
+    const kind = creationAttachmentKind(attachment);
+    const url = kind === "image" ? attachment.previewUrl || ("dataUrl" in attachment ? attachment.dataUrl : attachment.url) || "" : attachment.url || attachment.previewUrl;
+    return { kind, url };
+}
+
+export function creationMediaAspectRatio(value: string | undefined, mode: CreationMode) {
+    const fallback = mode === "video" ? "16 / 9" : "1 / 1";
+    const match = value?.trim().match(/^(\d+(?:\.\d+)?)\s*[:x/]\s*(\d+(?:\.\d+)?)$/i);
+    if (!match) return fallback;
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return fallback;
+    return `${width} / ${height}`;
+}
+
+export function removeCreationAttachment<T extends { id: string }>(attachments: T[], id: string) {
+    return attachments.filter((attachment) => attachment.id !== id);
+}
 
 export function creationAssetKey(identity: CreationAssetIdentity): string | undefined {
     const taskId = identity.taskId?.trim();
@@ -61,8 +126,33 @@ export function creationAttachmentFromVideo(file: File, uploaded: UploadedFile):
     };
 }
 
+export function creationAttachmentFromAudio(file: File, uploaded: UploadedFile): CreationAttachment {
+    return {
+        id: `upload:${file.name}:${uploaded.storageKey}`,
+        name: file.name,
+        type: uploaded.mimeType || file.type || "audio/mpeg",
+        url: uploaded.url,
+        storageKey: uploaded.storageKey,
+        bytes: uploaded.bytes,
+        durationMs: uploaded.durationMs,
+        previewUrl: uploaded.url,
+    };
+}
+
+export function creationAttachmentFromDocument(file: File, uploaded: UploadedFile): CreationAttachment {
+    return {
+        id: `upload:${file.name}:${uploaded.storageKey}`,
+        name: file.name,
+        type: uploaded.mimeType || file.type || "application/octet-stream",
+        url: uploaded.url,
+        storageKey: uploaded.storageKey,
+        bytes: uploaded.bytes,
+        previewUrl: "",
+    };
+}
+
 export function creationAttachmentFromAsset(asset: ImageAsset): CreationAttachment {
-    const url = asset.data.dataUrl || asset.coverUrl;
+    const url = resolveResourceUrl(asset.data.storageKey, asset.data.dataUrl || asset.coverUrl);
     return {
         id: `asset:${asset.id}`,
         name: asset.title || "素材图片",
@@ -92,6 +182,62 @@ export function creationAttachmentFromVideoAsset(asset: Extract<Asset, { kind: "
     };
 }
 
+export function creationAttachmentFromAudioAsset(asset: AudioAsset): CreationAttachment {
+    return {
+        id: `asset:${asset.id}`,
+        name: asset.title || "素材音频",
+        type: asset.data.mimeType || "audio/mpeg",
+        url: asset.data.url,
+        storageKey: asset.data.storageKey,
+        bytes: asset.data.bytes,
+        durationMs: asset.data.durationMs,
+        previewUrl: asset.data.url,
+    };
+}
+
+export function creationAttachmentFromExternalAsset(reference: ExternalAssetPickerReference): CreationAttachment {
+    const item = reference.item;
+    const url = item.fileUrl || "";
+    if (!url) throw new Error("“" + item.title + "”暂时无法读取，请先在 Eagle 中确认文件可用");
+    const id = "external:" + reference.sourceId + ":" + item.id;
+    const type = item.mimeType || (item.kind === "image" ? "image/png" : item.kind === "video" ? "video/mp4" : "audio/mpeg");
+    if (item.kind === "image") {
+        return {
+            id,
+            name: item.title || "素材图片",
+            type,
+            dataUrl: url,
+            url,
+            bytes: item.bytes,
+            width: item.width,
+            height: item.height,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    if (item.kind === "video") {
+        return {
+            id,
+            name: item.title || "素材视频",
+            type,
+            url,
+            bytes: item.bytes,
+            width: item.width,
+            height: item.height,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    if (item.kind === "audio") {
+        return {
+            id,
+            name: item.title || "素材音频",
+            type,
+            url,
+            bytes: item.bytes,
+            previewUrl: item.thumbnailUrl || url,
+        };
+    }
+    throw new Error("“" + item.title + "”不是可用于创作参考的媒体文件");
+}
 export function creationImageAsset({ title, uploaded, metadata }: { title: string; uploaded: UploadedImage; metadata?: Record<string, unknown> }): NewAsset {
     return {
         kind: "image",
@@ -112,11 +258,30 @@ export function creationImageAsset({ title, uploaded, metadata }: { title: strin
     };
 }
 
+export function creationAudioAsset({ title, uploaded, metadata }: { title: string; uploaded: UploadedFile; metadata?: Record<string, unknown> }): NewAsset {
+    return {
+        kind: "audio",
+        title: title.trim() || "创作音频",
+        coverUrl: "",
+        tags: ["创作"],
+        status: "confirmed",
+        source: "创作页",
+        metadata: { source: "create-page", ...metadata },
+        data: {
+            url: uploaded.url,
+            storageKey: uploaded.storageKey,
+            durationMs: uploaded.durationMs,
+            bytes: uploaded.bytes,
+            mimeType: uploaded.mimeType || "audio/mpeg",
+        },
+    };
+}
+
 export function creationVideoAsset({ title, uploaded, metadata }: { title: string; uploaded: UploadedFile; metadata?: Record<string, unknown> }): NewAsset {
     return {
         kind: "video",
         title: title.trim() || "创作视频",
-        coverUrl: uploaded.url,
+        coverUrl: canvasVideoAssetPreviewUrl(uploaded.url, uploaded.preview?.url),
         tags: ["创作"],
         status: "confirmed",
         source: "创作页",

@@ -1,11 +1,20 @@
 import type { ModelChannel } from "@/stores/use-config-store";
-import type { CreditLedgerEntry } from "@/services/api/wallet";
+import type { BillingOrder, CreditLedgerEntry } from "@/services/api/wallet";
 import type { GenerationTask, TaskStatus } from "@/services/api/task-center";
 import type { CanvasDrawingEngineSetting } from "@/lib/canvas/canvas-drawing-engine";
 import type { FeatureAvailability } from "@/stores/use-user-store";
 import { apiClient, request } from "@/services/api/request";
+import type { PublicLogicalModel } from "@/services/api/logical-models";
+import type { OSSConnectionTestInput, OSSConnectionTestResult, OSSProvider, S3Preset } from "@/lib/oss-settings";
 
 const api = apiClient;
+
+let authSessionRequest: Promise<AuthSessionPayload> | null = null;
+let authSessionCache: { payload: AuthSessionPayload; expiresAt: number } | null = null;
+
+function invalidateAuthSessionCache() {
+    authSessionCache = null;
+}
 
 export type LocalUser = {
     id: string;
@@ -30,7 +39,7 @@ export type AdminUser = LocalUser & {
 
 export type AuthSessionPayload = {
     user: LocalUser | null;
-    systemChannels?: ModelChannel[];
+    logicalModels?: PublicLogicalModel[];
     runtimeLimits?: RuntimeLimits;
     drawingEngine?: CanvasDrawingEngineSetting;
     features?: FeatureAvailability;
@@ -40,6 +49,7 @@ export type RuntimeLimits = {
     activeTaskLimit: number;
     resourceUploadMB: number;
     sessionUploadMB: number;
+    recycleBinRetentionDays?: number;
 };
 
 export type ApiCallLog = {
@@ -51,6 +61,10 @@ export type ApiCallLog = {
     channelName: string;
     taskId?: string;
     taskStatus?: TaskStatus;
+    billingOrderId?: string;
+    billingStatus?: BillingOrder["status"];
+    billingAmountMicrocredits: number;
+    billingAvailable: boolean;
     source: string;
     capability: "text" | "image" | "video" | "audio" | "";
     operation?: string;
@@ -111,8 +125,15 @@ export type AdminUserDetail = {
     account: { userId: string; availableMicrocredits: number; reservedMicrocredits: number; version: number };
     counts: { ledgerEntries: number; tasks: number; apiCalls: number; auditEvents: number };
     storageUsage: {
-        assetCount: number; assetBytes: number; canvasCount: number; canvasBytes: number;
-        sessionCount: number; sessionBytes: number; taskCount: number; taskBytes: number; apiCallCount: number;
+        assetCount: number;
+        assetBytes: number;
+        canvasCount: number;
+        canvasBytes: number;
+        sessionCount: number;
+        sessionBytes: number;
+        taskCount: number;
+        taskBytes: number;
+        apiCallCount: number;
     };
     storedFileBytes: number;
     dailyUploadBytes: number;
@@ -141,7 +162,7 @@ export type AnalyticsFilters = {
 
 export type AdminReferenceData = {
     users: Array<{ id: string; username: string; displayName: string }>;
-    channels: Array<{ id: string; name: string; models: string[] }>;
+    channels: Array<{ id: string; name: string; enabled: boolean; models: string[] }>;
 };
 
 export type AdminAnalytics = {
@@ -249,15 +270,37 @@ export type UserPromptPreference = {
 
 export type AdminOSSSetting = {
     enabled: boolean;
-    provider: "aliyun" | "tencent";
+    provider: OSSProvider;
+    s3Preset: S3Preset;
     region: string;
     endpoint: string;
+    cdnBaseUrl: string;
     bucket: string;
     accessKeyId: string;
     accessKeySecret?: string;
     hasAccessKeySecret: boolean;
+    sessionToken?: string;
+    hasSessionToken: boolean;
+    pathStyle: boolean;
+    allowUserS3: boolean;
     publicBaseUrl: string;
     pathPrefix: string;
+    testedAt?: string;
+    testedDigest?: string;
+    historyCount?: number;
+    referencedResourceCount?: number;
+    updatedBy?: string;
+    createdAt?: string;
+    updatedAt?: string;
+};
+
+export type AdminArkPrivateAssetSetting = {
+    enabled: boolean;
+    region: string;
+    projectName: string;
+    accessKeyId: string;
+    accessKeySecret?: string;
+    hasAccessKeySecret: boolean;
     updatedBy?: string;
     createdAt?: string;
     updatedAt?: string;
@@ -276,6 +319,7 @@ export type RuntimeResourcePolicy = {
     sessionCount: number;
     taskCount: number;
     apiCallLogCount: number;
+    recycleBinRetentionDays?: number;
 };
 
 export type RuntimeTaskPolicy = {
@@ -324,7 +368,6 @@ export type RuntimePolicySetting = {
     updatedAt?: string;
 };
 
-
 export function getAuthSettings() {
     return request<{ firstUser: boolean; registrationEnabled: boolean; linuxdoEnabled: boolean; emailEnabled: boolean; emailCodeRequired: boolean }>(api.get("/auth/settings"));
 }
@@ -335,7 +378,18 @@ export function linuxDOLoginURL(next: string) {
 }
 
 export function getAuthSession() {
-    return request<AuthSessionPayload>(api.get("/auth/session"));
+    const now = Date.now();
+    if (authSessionCache && authSessionCache.expiresAt > now) return Promise.resolve(authSessionCache.payload);
+    if (authSessionRequest) return authSessionRequest;
+    authSessionRequest = request<AuthSessionPayload>(api.get("/auth/session"))
+        .then((payload) => {
+            authSessionCache = { payload, expiresAt: Date.now() + 5_000 };
+            return payload;
+        })
+        .finally(() => {
+            authSessionRequest = null;
+        });
+    return authSessionRequest;
 }
 
 export function getSystemChannels() {
@@ -350,24 +404,37 @@ export function getAdminFeatureAvailability() {
     return request<{ features: FeatureAvailability }>(api.get("/admin/settings/features"));
 }
 
-export function updateAdminFeatureAvailability(features: Pick<FeatureAvailability, "shortDramaEnabled" | "taskCenterEnabled" | "creditsEnabled">) {
+export function updateAdminFeatureAvailability(features: Pick<FeatureAvailability, "shortDramaEnabled" | "taskCenterEnabled" | "creditsEnabled" | "customChannelsEnabled" | "frontendModelsEnabled" | "pluginCenterEnabled" | "systemPluginsVisibleToUsers">) {
     return request<{ features: FeatureAvailability }>(api.patch("/admin/settings/features", features));
 }
 
-export function login(input: { username: string; password: string }) {
-    return request<{ user: LocalUser }>(api.post("/auth/login", input));
+export async function login(input: { username: string; password: string }) {
+    const result = await request<{ user: LocalUser }>(api.post("/auth/login", input));
+    // 登录会改变服务端会话身份，不能让登录前缓存的游客 session 污染后续恢复。
+    invalidateAuthSessionCache();
+    return result;
 }
 
 export function sendRegistrationEmailCode(email: string) {
     return request<{ sent: boolean }>(api.post("/auth/email-code", { email }));
 }
 
+export function sendPasswordResetEmailCode(email: string) {
+    return request<{ sent: boolean }>(api.post("/auth/password-reset-code", { email }));
+}
+
+export function resetPassword(input: { email: string; emailCode: string; password: string }) {
+    return request<{ reset: boolean }>(api.post("/auth/password-reset", input));
+}
+
 export function register(input: { username: string; email?: string; emailCode?: string; displayName?: string; password: string }) {
     return request<{ user: LocalUser }>(api.post("/auth/register", input));
 }
 
-export function logout() {
-    return request<{ ok: boolean }>(api.post("/auth/logout"));
+export async function logout() {
+    const result = await request<{ ok: boolean }>(api.post("/auth/logout"));
+    invalidateAuthSessionCache();
+    return result;
 }
 
 export type AdminListParams = { keyword?: string; status?: string; role?: string; page?: number; limit?: number };
@@ -462,6 +529,18 @@ export function getAdminOSSSetting() {
 
 export function updateAdminOSSSetting(input: Partial<AdminOSSSetting>) {
     return request<{ setting: AdminOSSSetting }>(api.patch("/admin/settings/oss", input));
+}
+
+export function testAdminOSSConnection(input: OSSConnectionTestInput) {
+    return request<OSSConnectionTestResult>(api.post("/admin/settings/oss/test", input));
+}
+
+export function getAdminArkPrivateAssetSetting() {
+    return request<{ setting: AdminArkPrivateAssetSetting }>(api.get("/admin/settings/ark-private-assets"));
+}
+
+export function updateAdminArkPrivateAssetSetting(input: Partial<AdminArkPrivateAssetSetting>) {
+    return request<{ setting: AdminArkPrivateAssetSetting }>(api.patch("/admin/settings/ark-private-assets", input));
 }
 
 export function getAdminRuntimePolicySetting() {

@@ -1,17 +1,20 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Modal } from "antd";
-import { Bell, BellOff, CircleAlert, Info, ShieldAlert, Wrench } from "lucide-react";
+import { Button, Image as AntImage, Modal } from "antd";
+import { Bell, BellOff, CircleAlert, Info, Pin, ShieldAlert, Wrench } from "lucide-react";
 
 import { aceternityMotion } from "@/lib/aceternity-motion";
 import { AnnouncementContent } from "@/components/ui/announcement-content";
-import type { AnnouncementLevel, SystemAnnouncement } from "@/services/api/announcements";
+import { announcementImageUrl, type AnnouncementLevel, type SystemAnnouncement } from "@/services/api/announcements";
 
 type AnnouncementTimelineModalProps = {
     open: boolean;
     announcements: SystemAnnouncement[];
     loading?: boolean;
     error?: string;
+    automaticPrompt?: boolean;
     onClose: () => void;
+    onDismissOnce?: () => void;
+    onDismissToday?: () => void;
     onRetry?: () => void;
 };
 
@@ -22,7 +25,7 @@ const levelMeta: Record<AnnouncementLevel, { label: string; dot: string; icon: t
     critical: { label: "重要通知", dot: "bg-red-500", icon: ShieldAlert },
 };
 
-export function AnnouncementTimelineModal({ open, announcements, loading = false, error = "", onClose, onRetry }: AnnouncementTimelineModalProps) {
+export function AnnouncementTimelineModal({ open, announcements, loading = false, error = "", automaticPrompt = false, onClose, onDismissOnce, onDismissToday, onRetry }: AnnouncementTimelineModalProps) {
     const reducedMotion = useReducedMotion();
 
     return (
@@ -30,7 +33,12 @@ export function AnnouncementTimelineModal({ open, announcements, loading = false
             open={open}
             width={960}
             centered
-            footer={null}
+            footer={automaticPrompt ? (
+                <div className="flex flex-wrap justify-end gap-2">
+                    <Button onClick={onDismissToday}>今日不再提醒</Button>
+                    <Button type="primary" onClick={onDismissOnce}>关闭本次</Button>
+                </div>
+            ) : null}
             onCancel={onClose}
             title={
                 <div className="flex min-w-0 items-center gap-3 pr-8">
@@ -108,8 +116,10 @@ function AnnouncementTimelineItem({ announcement, last, reducedMotion }: { annou
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <h3 className="text-[var(--fs-body-lg)] font-semibold leading-6 tracking-normal text-foreground sm:text-base">{announcement.title}</h3>
                     <span className="inline-flex items-center gap-1 text-[var(--fs-label)] font-medium text-foreground/45"><Icon className="size-3" />{meta.label}</span>
+                    {announcement.pinned ? <span className="inline-flex items-center gap-1 text-[var(--fs-label)] font-medium text-amber-500"><Pin className="size-3" />置顶</span> : null}
                 </div>
-                <AnnouncementContent content={announcement.content} className="mt-1 text-sm leading-6 text-foreground/75 sm:text-[var(--fs-body-lg)]" />
+                {announcement.imageUrl ? <AntImage src={announcementImageUrl(announcement)} alt={`${announcement.title} 配图`} preview className="mt-3 max-h-36 w-56 max-w-full rounded-lg border border-border/70 bg-muted/20 object-contain p-1" /> : null}
+                {announcement.content ? <AnnouncementContent content={announcement.content} className="mt-1 text-sm leading-6 text-foreground/75 sm:text-[var(--fs-body-lg)]" /> : null}
                 <time dateTime={announcement.publishedAt} className="mt-2 block text-xs tabular-nums text-foreground/40">{relativeTime(announcement.publishedAt)} · {formatDateTime(announcement.publishedAt)}</time>
             </div>
         </motion.article>

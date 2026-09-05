@@ -3,10 +3,12 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import { ChevronDown, ChevronRight, Video } from "lucide-react";
 
 import { CometCard } from "@/components/ui/aceternity/comet-card";
-import { FRAME_HEADER_HEIGHT, FRAME_PADDING } from "@/lib/canvas/canvas-frame";
+import { CanvasFolderPreview } from "@/components/canvas/canvas-folder-preview";
+import { FRAME_HEADER_HEIGHT, FRAME_PADDING, isCanvasFolderNode } from "@/lib/canvas/canvas-frame";
+import { canvasNodeVideoPreviewUrl } from "@/lib/canvas/canvas-media-preview";
 import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
-import { CanvasNodeType, type CanvasNodeData, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasFolderStyle, type CanvasFolderTheme, type CanvasNodeData, type Position } from "@/types/canvas";
 
 type ResizeCorner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
@@ -20,6 +22,8 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
     onMouseDown,
     onResize,
     onToggleCollapsed,
+    onFolderStyleChange,
+    onFolderThemeChange = () => undefined,
     onTitleChange,
     onContextMenu,
     readOnly = false,
@@ -35,6 +39,8 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
     onMouseDown: (event: ReactMouseEvent, nodeId: string) => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
     onToggleCollapsed: (nodeId: string) => void;
+    onFolderStyleChange: (nodeId: string, style: CanvasFolderStyle) => void;
+    onFolderThemeChange?: (nodeId: string, theme: CanvasFolderTheme) => void;
     onTitleChange: (nodeId: string, title: string) => void;
     onContextMenu: (event: ReactMouseEvent, nodeId: string) => void;
     readOnly?: boolean;
@@ -43,6 +49,7 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
 }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const collapsed = Boolean(data.metadata?.frame?.collapsed);
+    const folder = isCanvasFolderNode(data);
     const [editing, setEditing] = useState(false);
     const [title, setTitle] = useState(data.title);
     const resizeRef = useRef({
@@ -63,7 +70,7 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
     useEffect(() => setTitle(data.title), [data.title]);
 
     const commitTitle = () => {
-        const next = title.trim() || "未命名背板";
+        const next = title.trim() || (folder ? "未命名文件夹" : "未命名背板");
         setTitle(next);
         setEditing(false);
         onTitleChange(data.id, next);
@@ -140,11 +147,15 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
     };
 
     const active = isSelected || isDropTarget;
+    const linkedFolder = Boolean(data.metadata?.folder?.assetFolderId);
 
     return (
         <div
             data-node-id={data.id}
-            className={`absolute z-0 select-none ${dragOffset ? "cursor-grabbing" : "cursor-default"}`}
+            role={folder && collapsed ? "group" : undefined}
+            tabIndex={folder && collapsed ? 0 : undefined}
+            aria-label={folder && collapsed ? `${data.title}，文件夹，${childNodes.length} 项内容。按回车打开` : undefined}
+            className={`absolute z-0 select-none${folder && collapsed ? " canvas-folder-node" : ""} ${dragOffset ? "cursor-grabbing" : "cursor-default"}`}
             style={{ transform: `translate(${data.position.x + (dragOffset?.x || 0)}px, ${data.position.y + (dragOffset?.y || 0)}px)`, width: data.width, height: data.height, contain: "layout style" }}
             onMouseDown={(event) => onMouseDown(event, data.id)}
             onDoubleClick={(event) => {
@@ -153,22 +164,43 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
                 onToggleCollapsed(data.id);
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
+            onKeyDown={(event) => {
+                if (!folder || !collapsed || (event.target instanceof Element && event.target.closest("button,input"))) return;
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                onToggleCollapsed(data.id);
+            }}
             onMouseEnter={() => onHoverStart?.(data.id)}
             onMouseLeave={() => onHoverEnd?.(data.id)}
         >
             {/* 帧节点同样禁用指针跟随 3D 位移，hover 使用 CSS 静态抬升 */}
             <CometCard
                 containerClassName="h-full w-full"
-                className="canvas-frame-shell overflow-hidden rounded-[var(--dock-radius)] border"
+                className={folder && collapsed ? "canvas-folder-shell overflow-visible" : `canvas-frame-shell overflow-hidden rounded-[var(--dock-radius)] border${folder ? " canvas-folder-expanded" : ""}`}
                 disabled
                 data-canvas-frame-hover-locked={!collapsed || editing || Boolean(dragOffset) || scale < 0.32 ? "true" : "false"}
                 style={{
-                    background: active ? theme.frame.activeFill : theme.frame.fill,
-                    borderColor: active ? theme.frame.activeStroke : theme.frame.stroke,
-                    borderWidth: 1 / Math.max(scale, 0.05),
-                    boxShadow: isSelected ? `0 0 0 ${1 / Math.max(scale, 0.05)}px ${theme.frame.activeStroke}33, 0 24px 72px ${theme.spatial.shadow}` : `0 18px 54px ${theme.spatial.shadow}`,
+                    background: folder && collapsed ? "transparent" : active ? theme.frame.activeFill : theme.frame.fill,
+                    borderColor: folder && collapsed ? "transparent" : active ? theme.frame.activeStroke : theme.frame.stroke,
+                    borderWidth: folder && collapsed ? 0 : 1 / Math.max(scale, 0.05),
+                    boxShadow: folder && collapsed ? "none" : isSelected ? `0 0 0 ${1 / Math.max(scale, 0.05)}px ${theme.frame.activeStroke}33, 0 24px 72px ${theme.spatial.shadow}` : `0 18px 54px ${theme.spatial.shadow}`,
                 }}
             >
+                {folder && collapsed ? (
+                    // 素材库目录是单一事实源；画布节点只负责浏览和调用，避免本地改名后被同步结果覆盖。
+                    <CanvasFolderPreview
+                        data={data}
+                        childNodes={childNodes}
+                        active={active}
+                        isDropTarget={isDropTarget}
+                        readOnly={readOnly || linkedFolder}
+                        onToggleCollapsed={onToggleCollapsed}
+                        onTitleChange={onTitleChange}
+                        onStyleChange={onFolderStyleChange}
+                        onThemeChange={onFolderThemeChange}
+                    />
+                ) : (
+                    <>
                 <div className="pointer-events-auto absolute inset-x-0 top-0 z-10 flex items-center gap-1.5 px-1.5" style={{ height: FRAME_HEADER_HEIGHT, color: theme.node.text }}>
                     <button
                         type="button"
@@ -220,6 +252,8 @@ export const CanvasFrameNode = React.memo(function CanvasFrameNode({
                 </div>
 
                 {collapsed ? <FramePreview nodes={childNodes} frame={data} theme={theme} /> : null}
+                    </>
+                )}
             </CometCard>
             {!readOnly && !collapsed && isSelected && !data.metadata?.locked ? (
                 <>
@@ -260,15 +294,16 @@ function FramePreview({ nodes, frame, theme }: { nodes: CanvasNodeData[]; frame:
     return (
         <div className="pointer-events-none absolute inset-x-2 bottom-2 overflow-hidden rounded-md" style={{ top: FRAME_HEADER_HEIGHT, background: theme.frame.preview }}>
             {layout.length ? (
-                layout.map(({ node, ...style }) => (
-                    <div key={node.id} className="absolute overflow-hidden rounded-[var(--r-xs)] border" style={{ ...style, background: theme.node.fill, borderColor: theme.node.stroke }}>
+                layout.map(({ node, ...style }) => {
+                    const videoPreview = canvasNodeVideoPreviewUrl(node);
+                    return <div key={node.id} className="absolute overflow-hidden rounded-[var(--r-xs)] border" style={{ ...style, background: theme.node.fill, borderColor: theme.node.stroke }}>
                         {node.type === CanvasNodeType.Image && node.metadata?.content ? <img src={node.metadata.content} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" draggable={false} /> : null}
-                        {node.type === CanvasNodeType.Video && node.metadata?.content ? <video src={node.metadata.content} className="h-full w-full object-cover" muted playsInline preload="metadata" /> : null}
-                        {node.type === CanvasNodeType.Video && !node.metadata?.content ? <Video className="m-auto size-4 h-full opacity-40" /> : null}
+                        {videoPreview ? <img src={videoPreview} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" draggable={false} /> : null}
+                        {node.type === CanvasNodeType.Video && !videoPreview ? <Video className="m-auto size-4 h-full opacity-40" /> : null}
                         {node.type === CanvasNodeType.Text ? <div className="line-clamp-3 p-1 text-[var(--fs-nano)] leading-[9px]" style={{ color: theme.node.text }}>{node.metadata?.content || node.title}</div> : null}
                         {node.type === CanvasNodeType.Script ? <div className="p-1 text-[var(--fs-nano)] leading-[9px]" style={{ color: theme.node.text }}>分镜脚本 · {node.metadata?.storyboard?.rows.length || 0} 镜</div> : null}
-                    </div>
-                ))
+                    </div>;
+                })
             ) : (
                 <div className="grid h-full place-items-center text-[var(--fs-label)]" style={{ color: theme.node.faint }}>空背板</div>
             )}

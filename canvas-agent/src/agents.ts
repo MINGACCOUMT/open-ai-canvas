@@ -5,20 +5,25 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
-import { AGENT_PROMPT, VERSION } from "./config.js";
+import { CANVAS_GENERATION_CONTINUATION_TIMEOUT_MS } from "./canvas-tool-timeouts.js";
+import { AGENT_PROMPT, CONFIG_DIR, VERSION } from "./config.js";
 import { assertCodexThreadWorkspace, codexThreadInWorkspace, resolveCodexThread } from "./codex-thread.js";
 import type { AgentAttachment, AgentEmit } from "./types.js";
 
 type Json = Record<string, unknown>;
 type AgentEvent = Json & { type: string; usage?: unknown };
 type PendingRequest = { resolve: (value: unknown) => void; reject: (error: Error) => void };
-type CodexRunOptions = { threadId?: string; cwd?: string; onThreadId?: (threadId: string) => void };
+export type AgentSkillFile = { path: string; mimeType?: string; contentBase64: string };
+export type AgentSkillReference = { skillId?: string; name: string; description?: string; version?: string; files?: AgentSkillFile[]; instruction?: string };
+export type CodexSkillInput = { type: "skill"; name: string; path: string };
+type CodexRunOptions = { threadId?: string; cwd?: string; skills?: AgentSkillReference[]; onThreadId?: (threadId: string) => void };
 type AgentHistoryMessage = { id: string; role: "user" | "assistant" | "tool" | "error"; title?: string; text: string; detail?: unknown; streamId?: string };
 
 let codexQueue: Promise<unknown> = Promise.resolve();
 let codexApp: CodexAppClient | null = null;
 let codexThreadId = "";
 const canvasAgentMcp = canvasAgentMcpCommand();
+const INTERNAL_CANVAS_MCP_TIMEOUT_MARGIN_MS = 60_000;
 const require = createRequire(import.meta.url);
 
 export function withAgentPrompt(prompt: string) {
@@ -33,16 +38,20 @@ export async function runCodexTurn(prompt: string, emit: AgentEmit, attachments:
 
 async function runCodexTurnNow(prompt: string, emit: AgentEmit, attachments: AgentAttachment[], options: CodexRunOptions) {
     let files: string[] = [];
+    let skillDirectories: string[] = [];
     try {
         files = await writeAttachmentFiles(attachments);
+        const preparedSkills = await writeSkillFiles(options.skills || []);
+        skillDirectories = preparedSkills.directories;
         codexApp ||= await CodexAppClient.start(emit);
         const threadId = await ensureCodexThread(codexApp, options);
         if (threadId !== options.threadId) options.onThreadId?.(threadId);
-        await codexApp.startTurn(threadId, prompt, files);
+        await codexApp.startTurn(threadId, prompt, files, preparedSkills.inputs);
     } catch (error) {
         emit("agent_error", { message: errorMessage(error) });
     } finally {
         await Promise.all(files.map((file) => fs.unlink(file).catch(() => undefined)));
+        await Promise.all(skillDirectories.map((directory) => fs.rm(directory, { recursive: true, force: true }).catch(() => undefined)));
     }
 }
 
@@ -93,7 +102,7 @@ export async function archiveCodexThread(emit: AgentEmit, threadId: string, cwd?
 
 export function runClaudeTurn(prompt: string, emit: AgentEmit) {
     if (!prompt.trim()) return;
-    const child = spawnAgent("claude", ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--allowedTools", "mcp__infinite-canvas__*", prompt], ["ignore", "pipe", "pipe"], emit);
+    const child = spawnAgent("claude", ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--allowedTools", "mcp__yingce__*", prompt], ["ignore", "pipe", "pipe"], emit);
     if (!child) return;
     pipeJsonLines(child, emit, "claude");
 }
@@ -160,8 +169,8 @@ class CodexAppClient {
         return this.request("thread/archive", { threadId });
     }
 
-    async startTurn(threadId: string, prompt: string, images: string[]) {
-        const result = await this.request("turn/start", { threadId, input: codexInput(prompt, images), approvalPolicy: "never" });
+    async startTurn(threadId: string, prompt: string, images: string[], skills: CodexSkillInput[] = []) {
+        const result = await this.request("turn/start", { threadId, input: codexInput(prompt, images, skills), approvalPolicy: "never" });
         const turnId = String(field(field(result, "turn"), "id") || "");
         if (!turnId) throw new Error("Codex app-server 没有返回 turn id");
         const completed = this.completedTurns.get(turnId);
@@ -263,19 +272,40 @@ class CodexAppClient {
     }
 }
 
-function canvasAgentMcpCommand() {
+export function canvasAgentMcpCommand() {
     const current = process.argv.find((arg) => /index\.(t|j)s$/.test(arg)) || "";
     const entry = path.resolve(current || fileURLToPath(new URL("./index.js", import.meta.url)));
     const tsx = path.join(path.dirname(entry), "..", "node_modules", "tsx", "dist", "cli.mjs");
-    return entry.endsWith(".ts") ? { command: process.execPath, args: [tsx, entry, "mcp"] } : { command: process.execPath, args: [entry, "mcp"] };
+    return entry.endsWith(".ts")
+        ? { command: process.execPath, args: [tsx, entry, "mcp", "--canvas-only"] }
+        : { command: process.execPath, args: [entry, "mcp", "--canvas-only"] };
 }
 
-function codexConfig() {
-    return { mcp_servers: { "infinite-canvas": { command: canvasAgentMcp.command, args: canvasAgentMcp.args, default_tools_approval_mode: "approve", startup_timeout_sec: 20, tool_timeout_sec: 90 } } };
+export function codexConfig(configDir = CONFIG_DIR) {
+    return {
+        mcp_servers: {
+            "yingce": {
+                command: canvasAgentMcp.command,
+                args: canvasAgentMcp.args,
+                env: { FRAMEFIELD_LOCAL_RUNTIME_CONFIG_DIR: configDir },
+                default_tools_approval_mode: "approve",
+                startup_timeout_sec: 20,
+                tool_timeout_sec: Math.ceil((CANVAS_GENERATION_CONTINUATION_TIMEOUT_MS + INTERNAL_CANVAS_MCP_TIMEOUT_MARGIN_MS) / 1_000),
+            },
+        },
+    };
 }
 
-function codexInput(prompt: string, images: string[]) {
-    return [{ type: "text", text: prompt, text_elements: [] }, ...images.map((file) => ({ type: "localImage", path: file }))];
+export function codexInput(prompt: string, images: string[], skills: CodexSkillInput[]) {
+    // Skill inputs are first-class app-server UserInput items. Do not add a
+    // `$skill` marker or copy SKILL.md into the text item: doing either turns
+    // native skill selection back into prompt expansion and makes the skill
+    // visible as ordinary user text in history.
+    return [
+        { type: "text", text: prompt, text_elements: [] },
+        ...images.map((file) => ({ type: "localImage", path: file })),
+        ...skills,
+    ];
 }
 
 function normalizeCodexNotification(method: string, params: Json): AgentEvent | null {
@@ -404,6 +434,13 @@ function stringOrNull(value: unknown) {
 function toolName(name: string) {
     if (name === "canvas_apply_ops") return "画布操作";
     if (name === "canvas_get_state") return "读取画布";
+    if (name === "canvas_get_context") return "读取画布上下文";
+    if (name === "canvas_find_nodes") return "检索画布节点";
+    if (name === "canvas_get_node") return "读取画布节点";
+    if (name === "canvas_get_connection") return "读取画布连线";
+    if (name === "canvas_get_generation_tasks") return "读取生成任务";
+    if (name === "canvas_get_resources") return "读取画布资源";
+    if (name === "canvas_validate_ops") return "校验画布操作";
     if (name === "canvas_get_selection") return "读取选区";
     if (name === "canvas_export_snapshot") return "导出快照";
     if (name === "canvas_create_text_node") return "创建文本";
@@ -427,6 +464,82 @@ async function writeAttachmentFile(item: AgentAttachment) {
     const file = path.join(os.tmpdir(), `infinite-canvas-${Date.now()}-${Math.random().toString(16).slice(2)}.${imageExt(meta || item.type)}`);
     await fs.writeFile(file, Buffer.from(data, "base64"));
     return file;
+}
+
+export async function writeSkillFiles(skills: AgentSkillReference[]) {
+    const directories: string[] = [];
+    const inputs: CodexSkillInput[] = [];
+    const usedNames = new Set<string>();
+    try {
+        for (const skill of skills.slice(0, 8)) {
+            const baseName = `canvas-${safeSkillSegment(skill.skillId || skill.name)}`;
+            const name = uniqueSkillName(baseName, usedNames);
+            usedNames.add(name);
+            const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), "infinite-canvas-skill-"));
+            directories.push(temporaryRoot);
+            const directory = path.join(temporaryRoot, name);
+            await fs.mkdir(directory, { recursive: true });
+            const packageFiles = Array.isArray(skill.files) ? skill.files : [];
+            if (packageFiles.length) {
+                for (const item of packageFiles) {
+                    const relativePath = safeSkillFilePath(item.path);
+                    const target = path.join(directory, ...relativePath.split("/"));
+                    await fs.mkdir(path.dirname(target), { recursive: true });
+                    await fs.writeFile(target, Buffer.from(item.contentBase64, "base64"));
+                }
+            } else {
+                const instruction = String(skill.instruction || "").trim().slice(0, 24_000);
+                if (!instruction) continue;
+                await fs.writeFile(path.join(directory, "SKILL.md"), skillMarkdown(name, skill.name, skill.description, instruction), "utf8");
+            }
+            const file = path.join(directory, "SKILL.md");
+            let entry = await fs.readFile(file, "utf8");
+            if (!hasSkillFrontmatter(entry)) {
+                entry = skillMarkdown(name, skill.name, skill.description, entry);
+                await fs.writeFile(file, entry, "utf8");
+            }
+            inputs.push({ type: "skill", name, path: file });
+        }
+        return { directories, inputs };
+    } catch (error) {
+        await Promise.all(directories.map((directory) => fs.rm(directory, { recursive: true, force: true }).catch(() => undefined)));
+        throw error;
+    }
+}
+
+function skillMarkdown(name: string, title: string, description: string | undefined, instruction: string) {
+    const summary = String(description || title).trim().slice(0, 500).replace(/[\r\n]+/g, " ");
+    return [`---`, `name: ${name}`, `description: ${JSON.stringify(summary)}`, `---`, ``, `# ${title}`, ``, instruction, ``].join("\n");
+}
+
+function hasSkillFrontmatter(value: string) {
+    const normalized = value.replace(/^\uFEFF/, "");
+    if (!normalized.startsWith("---\n") && !normalized.startsWith("---\r\n")) return false;
+    const end = normalized.indexOf("\n---", 4);
+    if (end < 0) return false;
+    const frontmatter = normalized.slice(0, end);
+    return /^name\s*:/m.test(frontmatter) && /^description\s*:/m.test(frontmatter);
+}
+
+function safeSkillFilePath(value: string) {
+    const normalized = String(value || "").trim().replace(/\\/g, "/");
+    const segments = normalized.split("/");
+    if (!normalized || normalized.startsWith("/") || segments.some((segment) => !segment || segment === "." || segment === "..") || normalized.includes("\0")) {
+        throw new Error(`技能文件路径无效：${normalized || "空路径"}`);
+    }
+    return normalized;
+}
+
+function uniqueSkillName(baseName: string, usedNames: Set<string>) {
+    if (!usedNames.has(baseName)) return baseName;
+    let suffix = 2;
+    while (usedNames.has(`${baseName}-${suffix}`)) suffix += 1;
+    return `${baseName}-${suffix}`;
+}
+
+function safeSkillSegment(value: string) {
+    const normalized = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48);
+    return normalized || "skill";
 }
 
 function imageExt(type = "") {

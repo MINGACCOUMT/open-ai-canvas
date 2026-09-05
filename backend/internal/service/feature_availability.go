@@ -14,27 +14,47 @@ import (
 const featureAvailabilitySettingKey = "feature_availability"
 
 const (
-	FeatureShortDrama = "shortDrama"
-	FeatureTaskCenter = "taskCenter"
-	FeatureCredits    = "credits"
+	FeatureShortDrama            = "shortDrama"
+	FeatureTaskCenter            = "taskCenter"
+	FeatureCredits               = "credits"
+	FeatureCustomChannels        = "customChannels"
+	FeatureFrontendModels        = "frontendModels"
+	FeaturePluginCenter          = "pluginCenter"
+	FeatureSystemPlugins         = "systemPluginsVisibleToUsers"
+	FeatureTimelineTranscription = "timelineTranscription"
 )
 
 type FeatureAvailability struct {
-	ShortDramaEnabled bool `json:"shortDramaEnabled"`
-	TaskCenterEnabled bool `json:"taskCenterEnabled"`
-	CreditsEnabled    bool `json:"creditsEnabled"`
+	ShortDramaEnabled            bool `json:"shortDramaEnabled"`
+	TaskCenterEnabled            bool `json:"taskCenterEnabled"`
+	CreditsEnabled               bool `json:"creditsEnabled"`
+	CustomChannelsEnabled        bool `json:"customChannelsEnabled"`
+	FrontendModelsEnabled        bool `json:"frontendModelsEnabled"`
+	PluginCenterEnabled          bool `json:"pluginCenterEnabled"`
+	SystemPluginsVisibleToUsers  bool `json:"systemPluginsVisibleToUsers"`
+	TimelineTranscriptionEnabled bool `json:"timelineTranscriptionEnabled"`
 }
 
 type PublicFeatureAvailability struct {
 	FeatureAvailability
-	Configured bool      `json:"configured"`
-	UpdatedBy  string    `json:"updatedBy,omitempty"`
-	UpdatedAt  time.Time `json:"updatedAt,omitempty"`
+	DesktopLocalChannelsEnabled bool      `json:"desktopLocalChannelsEnabled"`
+	Configured                  bool      `json:"configured"`
+	UpdatedBy                   string    `json:"updatedBy,omitempty"`
+	UpdatedAt                   time.Time `json:"updatedAt,omitempty"`
 }
 
 func defaultFeatureAvailability() FeatureAvailability {
-	// 缺少配置代表尚未由运维接管，默认保持现有功能全部开放。
-	return FeatureAvailability{ShortDramaEnabled: true, TaskCenterEnabled: true, CreditsEnabled: true}
+	// 缺少配置代表尚未由运维接管；前台模型需要明确配置后才开放。
+	return FeatureAvailability{
+		ShortDramaEnabled:            true,
+		TaskCenterEnabled:            true,
+		CreditsEnabled:               true,
+		CustomChannelsEnabled:        true,
+		FrontendModelsEnabled:        false,
+		PluginCenterEnabled:          true,
+		SystemPluginsVisibleToUsers:  true,
+		TimelineTranscriptionEnabled: true,
+	}
 }
 
 func (s *Service) FeatureAvailability() (*PublicFeatureAvailability, error) {
@@ -42,7 +62,7 @@ func (s *Service) FeatureAvailability() (*PublicFeatureAvailability, error) {
 	if err != nil {
 		return nil, err
 	}
-	return publicFeatureAvailability(setting, value), nil
+	return s.withRuntimeCapabilities(publicFeatureAvailability(setting, value)), nil
 }
 
 func (s *Service) AdminFeatureAvailability(actor *model.User) (*PublicFeatureAvailability, error) {
@@ -74,7 +94,7 @@ func (s *Service) UpdateFeatureAvailability(actor *model.User, value FeatureAvai
 	if err := s.appendAdminAudit(actor, "feature_availability.update", "system_setting", featureAvailabilitySettingKey, "更新功能开放配置", map[string]any{"before": before, "after": value}); err != nil {
 		return nil, err
 	}
-	return publicFeatureAvailability(&setting, value), nil
+	return s.withRuntimeCapabilities(publicFeatureAvailability(&setting, value)), nil
 }
 
 func (s *Service) FeatureEnabled(feature string) (bool, error) {
@@ -89,6 +109,16 @@ func (s *Service) FeatureEnabled(feature string) (bool, error) {
 		return value.TaskCenterEnabled, nil
 	case FeatureCredits:
 		return value.CreditsEnabled, nil
+	case FeatureCustomChannels:
+		return value.CustomChannelsEnabled, nil
+	case FeatureFrontendModels:
+		return value.FrontendModelsEnabled, nil
+	case FeaturePluginCenter:
+		return value.PluginCenterEnabled, nil
+	case FeatureSystemPlugins:
+		return value.SystemPluginsVisibleToUsers, nil
+	case FeatureTimelineTranscription:
+		return value.TimelineTranscriptionEnabled, nil
 	default:
 		return false, errors.New("未知功能开放配置")
 	}
@@ -109,6 +139,16 @@ func (s *Service) RequireFeature(feature string) error {
 		return Forbidden("任务中心暂未开放")
 	case FeatureCredits:
 		return Forbidden("积分功能暂未开放")
+	case FeatureCustomChannels:
+		return Forbidden("自定义渠道暂未开放")
+	case FeatureFrontendModels:
+		return Forbidden("前台模型目录暂未开放")
+	case FeaturePluginCenter:
+		return Forbidden("插件中心暂未开放")
+	case FeatureSystemPlugins:
+		return Forbidden("系统插件暂未向普通用户展示")
+	case FeatureTimelineTranscription:
+		return Forbidden("字幕转写暂未开放")
 	default:
 		return Forbidden("该功能暂未开放")
 	}
@@ -122,11 +162,19 @@ func (s *Service) readFeatureAvailability() (*model.SystemSetting, FeatureAvaila
 	if err != nil {
 		return nil, FeatureAvailability{}, err
 	}
-	value := FeatureAvailability{}
+	// 以全开放默认值为基底，避免已有三字段配置在升级后因缺少新字段而意外关闭功能。
+	value := defaultFeatureAvailability()
 	if strings.TrimSpace(setting.ValueJSON) == "" || json.Unmarshal([]byte(setting.ValueJSON), &value) != nil {
 		return nil, FeatureAvailability{}, errors.New("功能开放配置格式无效")
 	}
 	return setting, value, nil
+}
+
+func (s *Service) withRuntimeCapabilities(result *PublicFeatureAvailability) *PublicFeatureAvailability {
+	if result != nil {
+		result.DesktopLocalChannelsEnabled = s.DesktopLocalChannelsEnabled()
+	}
+	return result
 }
 
 func publicFeatureAvailability(setting *model.SystemSetting, value FeatureAvailability) *PublicFeatureAvailability {
