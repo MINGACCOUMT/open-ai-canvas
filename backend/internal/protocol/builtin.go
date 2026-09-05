@@ -378,11 +378,22 @@ func newAPIChannel1Adapter() Adapter {
 	})
 }
 
+// xAI 视频接口的 resolution 枚举只有 1k/2k；原始档位（720/1080p/…）必须收敛，
+// 否则上游 serde 拒收：unknown variant, expected `1k` or `2k`。
+func xaiVideoResolutionTier(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1080", "1080p", "1440", "1440p", "2k", "2160", "2160p", "4k", "high":
+		return "2k"
+	default:
+		return "1k"
+	}
+}
+
 func xAIVideosAdapter() Adapter {
 	info := metadata("xai-video", "xAI 官方视频", "xAI", CapabilityVideo, "POST /v1/videos/generations", "GET /v1/videos/{request_id}", "application/json")
 	info.Parameters = videoParams()
 	return videoAdapter(info, func(r GenerationRequest) (RequestSpec, error) {
-		body := map[string]any{"model": r.Model, "prompt": r.Prompt, "duration": defaultInt(r.Duration, 6), "aspect_ratio": defaultValue(r.AspectRatio, "16:9"), "resolution": defaultValue(r.Resolution, "720p")}
+		body := map[string]any{"model": r.Model, "prompt": r.Prompt, "duration": defaultInt(r.Duration, 6), "aspect_ratio": defaultValue(r.AspectRatio, "16:9"), "resolution": xaiVideoResolutionTier(r.Resolution)}
 		frameImages, referenceImages, unspecifiedImages := splitVideoImages(r.Images)
 		if len(frameImages) > 0 && len(referenceImages) > 0 {
 			return RequestSpec{}, fmt.Errorf("xAI 视频协议不能同时混用首尾帧和角色参考图")
