@@ -11,6 +11,13 @@ description: 当前项目已实现功能的手工验证清单与未确认边界
 - [ ] 使用 `pnpm install --frozen-lockfile` 后启动 `pnpm dev`，打开画布文本编辑器与项目章节编辑页，确认没有依赖预打包缺失导出错误。
 - [ ] 验证正文编辑、标题、列表、颜色、高亮、撤销重做、保存后重新打开，以及明暗主题外观。
 
+## v1.2.7 正式版本发布
+
+- 版本与镜像标签分别为 `v1.2.7` 和 `1.2.7`；发布流程构建前后端 Linux amd64/arm64 镜像并生成 GitHub Release、双架构 Host Updater 与 SHA256 校验文件，同时更新主分支 `latest` 镜像。
+- 本次发布目标是提供可用镜像，不自动部署服务、不修改线上数据库或运行配置。发布前应确认主分支质量检查、双架构镜像与 Release 附件均成功。
+- [ ] 拉取 `ghcr.io/ddcat-ai/open-ai-canvas-web:1.2.7` 与 `ghcr.io/ddcat-ai/open-ai-canvas-backend:1.2.7`，验证 amd64/arm64 manifest、容器内版本和提交信息，以及 `docker-compose.deploy.yml` 使用 `CANVAS_IMAGE_TAG=1.2.7` 启动。
+- [ ] 部署后验收登录、插件中心、文本节点、多角度编辑器、对象存储参考素材、模型批量操作、任务轮询、系统性能页面和真实生成链路；升级前备份数据库与数据目录。
+
 ## 创作页面附件缩略图
 
 - 聊天消息与分镜简报附件的放大图标样式排除 `.cached-resource-image-shell`，避免缓存图片容器被误设为透明和绝对定位；悬停与键盘聚焦仍显示放大图标。
