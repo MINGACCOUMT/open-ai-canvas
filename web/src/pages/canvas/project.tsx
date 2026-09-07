@@ -1036,7 +1036,9 @@ function InfiniteCanvasPage() {
             setDrawingNodeId(node.id);
         } else if (node.type === CanvasNodeType.Script) {
             setDialogNodeId(null);
-        } else if (node.type === CanvasNodeType.Text || node.type === CanvasNodeType.Frame) {
+        } else if (node.type === CanvasNodeType.Text) {
+            setDialogNodeId(node.id);
+        } else if (node.type === CanvasNodeType.Frame) {
             setDialogNodeId((current) => (current === node.id ? current : null));
         } else if (node.type === PORTRAIT_CLEARANCE_NODE_TYPE) {
             setDialogNodeId(null);
