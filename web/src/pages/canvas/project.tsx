@@ -2463,15 +2463,15 @@ function InfiniteCanvasPage() {
                         ) : null}
                     </div>
 
-                    {angleNode?.metadata?.content && !isCanvasNodeMoving ? (
-                        <CanvasNodePanelOverlay
-                            node={angleNode}
-                            viewport={viewport}
-                            containerRef={containerRef}
-                            panelWidth={580}
-                            panelHeight={350}
-                            dragOffset={dragPreview?.nodeIds.has(angleNode.id) ? { x: dragPreview.x, y: dragPreview.y } : null}
-                            isDragging={isNodeDragging && Boolean(dragPreview?.nodeIds.has(angleNode.id))}
+                    {angleNode?.metadata?.content ? (
+                        <Modal
+                            open
+                            centered
+                            title="多角度编辑器"
+                            footer={null}
+                            width={620}
+                            destroyOnHidden
+                            onCancel={() => setAngleNodeId(null)}
                         >
                             <CanvasNodeAnglePanel
                                 dataUrl={angleNode.metadata.content}
@@ -2480,7 +2480,7 @@ function InfiniteCanvasPage() {
                                     void generateAngleNode(angleNode, params);
                                 }}
                             />
-                        </CanvasNodePanelOverlay>
+                        </Modal>
                     ) : null}
 
                     {emotionNode?.metadata?.content && !isCanvasNodeMoving ? (
