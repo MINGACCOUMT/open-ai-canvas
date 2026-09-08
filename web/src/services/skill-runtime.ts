@@ -130,7 +130,7 @@ function functionTool(name: string, description: string, properties: Record<stri
 }
 
 const PROGRESSIVE_SKILL_TOOLS: ResponseFunctionTool[] = [
-    functionTool("canvas_list_skills", "列出当前用户已加入、可按需加载的画布技能；只返回元数据，不返回完整指令。", {}),
+    functionTool("canvas_list_skills", "自动发现当前用户已加入的技能；可按 query 检索名称、描述或标签，offset/limit 分页；只返回元数据。", { query: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }),
     functionTool("canvas_get_skill", "按 skillId 或名称读取技能元数据和入口 SKILL.md；不会加载 references、scripts、assets 等其他文件。", { skillId: { type: "string" }, name: { type: "string" } }),
     functionTool("canvas_list_skill_files", "列出一个技能包的文件路径、类型和大小，不读取文件正文。", { skillId: { type: "string" }, name: { type: "string" } }),
     functionTool("canvas_read_skill_file", "按路径读取技能包中的一个文本文件。先从入口引用或文件清单确定路径，禁止猜测路径。", { skillId: { type: "string" }, name: { type: "string" }, path: { type: "string" } }, ["path"]),
@@ -343,9 +343,13 @@ function nativePackage(skill: Skill, bundle: SkillPackageBundle): NativeSkillPac
 
 function createProgressiveToolsAdapter(dependencies: SkillRuntimeDependencies): SkillToolAdapter {
     const handlers: Record<string, (args: Record<string, unknown>, skills: Skill[]) => Promise<SkillRuntimeToolResult>> = {
-        canvas_list_skills: async (_args, skills) => {
-            const data = skills.filter((skill) => skill.is_added).map((skill) => ({ skillId: skill.skill_id, name: skill.skill_name, description: skill.description, tag: skill.tag, version: skill.version, fileCount: skill.file_count, sourceType: skill.source_type }));
-            return { ok: true, message: data.length ? "已列出当前可用技能。" : "当前没有已加入技能。", data };
+        canvas_list_skills: async (args, skills) => {
+            const terms = typeof args.query === "string" ? args.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean) : [];
+            const matches = skills.filter((skill) => skill.is_added && terms.every((term) => `${skill.skill_name} ${skill.description} ${skill.tag}`.toLocaleLowerCase().includes(term)));
+            const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset)) : 0;
+            const limit = typeof args.limit === "number" && Number.isFinite(args.limit) ? Math.max(1, Math.min(100, Math.floor(args.limit))) : 40;
+            const items = matches.slice(offset, offset + limit).map((skill) => ({ skillId: skill.skill_id, name: skill.skill_name, description: skill.description, tag: skill.tag, version: skill.version, fileCount: skill.file_count, sourceType: skill.source_type }));
+            return { ok: true, message: items.length ? "已发现相关技能，请按需读取入口；无匹配时可缩短关键词或查询完整目录。" : "没有匹配技能，可调整关键词。", data: { items, total: matches.length, nextOffset: offset + items.length < matches.length ? offset + items.length : null } };
         },
         canvas_get_skill: async (args, skills) => {
             const skill = requireAddedSkill(skills, args);

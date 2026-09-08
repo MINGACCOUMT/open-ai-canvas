@@ -1,7 +1,8 @@
 import { registerPlugin } from "@/lib/plugins/plugin-registry";
 import type { PluginManifest, RegisteredPlugin } from "@/lib/plugins/plugin-types";
 
-import { ART_CRITIQUE_NODE_TYPE, ART_CRITIQUE_PLUGIN_ID } from "@/lib/art-critique/contracts";
+import { ART_CRITIQUE_NODE_TYPE, ART_CRITIQUE_PLUGIN_ID, artCritiqueSourceFingerprint, createDefaultArtCritiqueState } from "@/lib/art-critique/contracts";
+import { prepareAnalysisNodeAction } from "../analysis-node-action";
 
 const manifest: PluginManifest = {
     apiVersion: "yingce.plugin/v1",
@@ -30,6 +31,15 @@ const manifest: PluginManifest = {
     },
 };
 
-export const artCritiquePlugin: RegisteredPlugin = { manifest };
+export const artCritiquePlugin: RegisteredPlugin = {
+    manifest,
+    agentActions: [prepareAnalysisNodeAction(ART_CRITIQUE_NODE_TYPE, "AI 审美批改", () => ({ artCritique: createDefaultArtCritiqueState() }))],
+    readAgentNode: (node, snapshot) => {
+        const state = node.metadata?.artCritique;
+        const sources = snapshot.nodes.filter((item) => item.type === "image" && snapshot.connections.some((edge) => edge.fromNodeId === item.id && edge.toNodeId === node.id));
+        const currentReport = state?.report && sources.length === 1 && state.report.sourceFingerprint === artCritiqueSourceFingerprint(sources[0]) ? state.report : undefined;
+        return { status: state?.report && !currentReport ? "stale" : state?.status || "idle", stage: state?.analysisStage, stageTaskIds: state?.stageTaskIds, sourceNodeId: state?.sourceNodeId, summary: currentReport?.summary, strengths: currentReport?.strengths, issues: currentReport?.issues, options: currentReport?.options, error: state?.errorMessage, execution: "已有报告仅在输入指纹一致时返回；新分析请使用节点的分析入口，当前 Agent 动作仅准备输入。" };
+    },
+};
 
 registerPlugin(artCritiquePlugin);

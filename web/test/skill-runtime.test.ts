@@ -54,6 +54,15 @@ function file(path: string, content: string, kind: SkillPackageFile["kind"] = "m
 }
 
 describe("skill runtime", () => {
+    test("可检索首屏之外的技能并分页，不暴露未加入技能", async () => {
+        const runtime = createSkillRuntime();
+        const skills = Array.from({ length: 45 }, (_, index) => skill({ skill_id: `skill-${index}`, skill_name: `技能 ${index}`, description: index === 44 ? "商品构图" : "通用" }));
+        skills.push(skill({ skill_id: "hidden", description: "商品构图", is_added: false }));
+        const first = await runtime.executeAgentTool("onlineAgent", "canvas_list_skills", {}, skills);
+        expect(first?.ok && first.data).toMatchObject({ total: 45, nextOffset: 40 });
+        const found = await runtime.executeAgentTool("onlineAgent", "canvas_list_skills", { query: "商品" }, skills);
+        expect(found?.ok && found.data).toMatchObject({ total: 1, nextOffset: null, items: [{ skillId: "skill-44" }] });
+    });
     test("技能引用解析由统一规则同时支持稳定 token 和自然提及", () => {
         const director = skill();
         const storyboard = skill({ skill_id: "storyboard", skill_name: "小说转分镜" });

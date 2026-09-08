@@ -59,7 +59,7 @@ export function normalizeCreativeProposal(raw: unknown, id: string, version: num
     if (!Array.isArray(workflow.nodes) || workflow.nodes.length < 1 || workflow.nodes.length > 20) throw new Error("方案应包含 1 至 20 个有明确用途的节点");
     const nodes = workflow.nodes.map((value) => {
         const node = record(value), kind = str(node.kind);
-        if (!["text", "image", "video"].includes(kind)) throw new Error("此方案包含本期不支持的节点类型");
+        if (!["text", "image", "video", "styleboard", "story_input", "script"].includes(kind)) throw new Error("方案节点类型不可用，请读取能力目录");
         const content = str(node.content), prompt = str(node.prompt);
         const assetId = str(node.assetId), ref = required(node.ref, "节点引用");
         if (assetId) {
@@ -67,14 +67,16 @@ export function normalizeCreativeProposal(raw: unknown, id: string, version: num
             if (kind !== "image" || !asset) throw new Error("方案引用的已有图片不可用");
             existingAssets[ref] = asset;
         }
-        if (!assetId && (kind === "text" ? !content : !prompt)) throw new Error("文本节点需要正文，媒体节点需要生成提示词");
-        return { ref: required(node.ref, "节点引用"), kind: kind as "text" | "image" | "video", title: required(node.title, "节点标题"), content, prompt, runGeneration: false, referenceRefs: Array.isArray(node.referenceRefs) ? node.referenceRefs.map(String) : [], referenceNodeIds: Array.isArray(node.referenceNodeIds) ? node.referenceNodeIds.map(String) : [] };
+        if (!assetId && (["text", "story_input"].includes(kind) ? !content : ["image", "video"].includes(kind) && !prompt)) throw new Error("文本节点需要正文，媒体节点需要生成提示词");
+        const shots = Array.isArray(node.shots) ? node.shots.map((value) => { const shot = record(value); const durationSeconds = Number(shot.durationSeconds); if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error("分镜时长必须大于零"); return { durationSeconds, videoMotionPrompt: required(shot.videoMotionPrompt, "分镜视频提示词"), dialogue: str(shot.dialogue) }; }) : undefined;
+        if (shots && shots.length > 100) throw new Error("分镜最多 100 行");
+        return { ref: required(node.ref, "节点引用"), kind: kind as "text" | "image" | "video" | "styleboard" | "story_input" | "script", title: required(node.title, "节点标题"), content, prompt, shots, runGeneration: false, referenceRefs: Array.isArray(node.referenceRefs) ? node.referenceRefs.map(String) : [], referenceNodeIds: Array.isArray(node.referenceNodeIds) ? node.referenceNodeIds.map(String) : [] };
     });
     const refs = new Set(nodes.map((node) => node.ref));
     if (refs.size !== nodes.length) throw new Error("方案节点引用重复");
     const generationItems: CreativeGenerationItem[] = (Array.isArray(data.generationItems) ? data.generationItems : []).map((value) => {
         const item = record(value), ref = required(item.ref, "生成目标"), node = nodes.find((candidate) => candidate.ref === ref);
-        if (!node || node.kind === "text" || node.kind !== item.mode || existingAssets[ref]) throw new Error("生成任务与媒体节点不匹配，已有素材不能重复计费");
+        if (!node || (node.kind !== "image" && node.kind !== "video") || node.kind !== item.mode || existingAssets[ref]) throw new Error("生成任务与媒体节点不匹配，已有素材不能重复计费");
         const model = required(item.model, "生成模型");
         if (!selectableModelsByCapability(config, node.kind).includes(model)) throw new Error(`节点“${node.title}”需要${node.kind === "video" ? "视频" : "图片"}模型，所选模型不支持该用途或已不可用：${model}。请从 availableModels 中选择 mode=${node.kind} 的模型重新提交方案。`);
         const referenceRefs: string[] = [];
@@ -104,7 +106,7 @@ export function normalizeCreativeProposal(raw: unknown, id: string, version: num
     });
     const mediaRefs = generationItems.map((item) => item.ref);
     if (new Set(mediaRefs).size !== mediaRefs.length) throw new Error("方案存在重复的 generationItems.ref，每个待生成媒体节点只能对应一个生成项");
-    const missing = nodes.filter((node) => node.kind !== "text" && !existingAssets[node.ref] && !mediaRefs.includes(node.ref));
+    const missing = nodes.filter((node) => (node.kind === "image" || node.kind === "video") && !existingAssets[node.ref] && !mediaRefs.includes(node.ref));
     if (missing.length) throw new Error(`方案缺少媒体生成配置：${missing.map((node) => `${node.title}（ref=${node.ref}，mode=${node.kind}）`).join("、")}。请补齐 generationItems；配置用于方案校验与报价，不代表立即生成，仍需用户确认。`);
     // 引用图的循环依赖会造成永远没有可执行批次。
     const visited = new Set<string>(), visiting = new Set<string>();

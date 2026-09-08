@@ -125,6 +125,7 @@ export type ArtCritiqueReport = {
 export type ArtCritiqueNodeStatus = "idle" | "running" | "completed" | "failed" | "stale";
 
 export type ArtCritiqueNodeState = {
+    stageTaskIds?: Record<string, string>;
     schemaVersion: typeof ART_CRITIQUE_SCHEMA_VERSION;
     status: ArtCritiqueNodeStatus;
     sourceNodeId?: string;

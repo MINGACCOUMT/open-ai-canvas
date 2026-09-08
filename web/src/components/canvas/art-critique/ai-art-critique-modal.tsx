@@ -21,9 +21,10 @@ import {
     type ArtCritiqueReport,
 } from "@/lib/art-critique/contracts";
 import { ART_CRITIQUE_CATEGORY_COLORS, ART_CRITIQUE_SEVERITY_COLORS, layoutArtCritiqueLabels, repairIssueTarget, targetBounds } from "@/lib/art-critique/annotation";
-import { runArtCritiquePipeline } from "@/lib/art-critique/pipeline";
+import { executeArtCritique } from "@/services/art-critique-execution";
+import { getActiveUserScope } from "@/lib/user-scope";
 import { useCopyText } from "@/hooks/use-copy-text";
-import { imageToDataUrl, resolveImageUrl } from "@/services/image-storage";
+import { resolveImageUrl } from "@/services/image-storage";
 import { modelOptionLabel, useEffectiveConfig } from "@/stores/use-config-store";
 import { usePluginStore } from "@/stores/use-plugin-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -78,7 +79,8 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
     const [hoveredIssueId, setHoveredIssueId] = useState<string | null>(null);
     const [draftReportVisible, setDraftReportVisible] = useState(false);
     const abortRef = useRef<AbortController | null>(null);
-    const preparedImageRef = useRef<{ fingerprint: string; dataUrl: string } | null>(null);
+    const currentRunTargetRef = useRef("");
+    currentRunTargetRef.current = `${getActiveUserScope()}:${node?.id || ""}:${currentFingerprint}`;
 
     useEffect(() => {
         if (!open || !input) {
@@ -110,6 +112,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
     }, [node?.id, currentFingerprint, open]);
 
     useEffect(() => () => abortRef.current?.abort(), []);
+    useEffect(() => () => abortRef.current?.abort(), [node?.id, currentFingerprint]);
 
     const issues = visibleState.report?.issues || [];
     const reportOptions = visibleState.report?.options || [];
@@ -160,6 +163,11 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
         const runId = `art-critique-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
         const controller = new AbortController();
         abortRef.current = controller;
+        const runTarget = currentRunTargetRef.current;
+        const runScope = getActiveUserScope();
+        const publishState = (next: ArtCritiqueNodeState) => {
+            if (getActiveUserScope() === runScope && currentRunTargetRef.current === runTarget && abortRef.current === controller) onUpdateState(node.id, next);
+        };
         const baseState: ArtCritiqueNodeState = {
             ...state,
             schemaVersion: ART_CRITIQUE_SCHEMA_VERSION,
@@ -168,41 +176,32 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             sourceNodeId: input.id,
             sourceFingerprint,
             lastRunId: runId,
+            stageTaskIds: {},
             errorCode: undefined,
             errorMessage: undefined,
             updatedAt: new Date().toISOString(),
         };
-        onUpdateState(node.id, baseState);
+        publishState(baseState);
         setRunning(true);
         setActiveStage("preparing");
         setLocalError("");
         let latestStage: ArtCritiquePipelineStage = "preparing";
         let runningReport: ArtCritiqueReport | undefined = state.report;
+        const stageTaskIds: Record<string, string> = {};
         try {
-            const source = input.metadata?.content || input.metadata?.previewContent || "";
-            const cachedImage = preparedImageRef.current;
-            const dataUrl =
-                cachedImage?.fingerprint === sourceFingerprint
-                    ? cachedImage.dataUrl
-                    : await imageToDataUrl({
-                          dataUrl: source.startsWith("data:") ? source : undefined,
-                          url: source.startsWith("data:") ? undefined : source,
-                          storageKey: input.metadata?.storageKey,
-                          name: input.title,
-                          mimeType: input.metadata?.mimeType,
-                      });
-            if (!dataUrl) throw new Error("无法读取输入图片");
-            if (!controller.signal.aborted) preparedImageRef.current = { fingerprint: sourceFingerprint, dataUrl };
-            const report = await runArtCritiquePipeline(
-                effectiveConfig,
-                { dataUrl, title: input.title, sourceFingerprint },
-                {
+            const report = await executeArtCritique({
+                    nodeId: node.id, runId, source: input, config: effectiveConfig,
                     signal: controller.signal,
+                    onTaskCreated: (stage, taskId) => {
+                        stageTaskIds[stage] = taskId;
+                        publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, analysisStage: latestStage, updatedAt: new Date().toISOString() });
+                    },
                     onStage: (analysisStage) => {
                         latestStage = analysisStage;
                         setActiveStage(analysisStage);
-                        onUpdateState(node.id, {
+                        publishState({
                             ...baseState,
+                            stageTaskIds: { ...stageTaskIds },
                             ...(runningReport ? { report: { ...runningReport, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) } } : {}),
                             analysisStage,
                             updatedAt: new Date().toISOString(),
@@ -212,19 +211,20 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
                         if (controller.signal.aborted || abortRef.current !== controller) return;
                         runningReport = draftReport;
                         setDraftReportVisible(true);
-                        onUpdateState(node.id, {
+                        publishState({
                             ...baseState,
+                            stageTaskIds: { ...stageTaskIds },
                             status: "running",
                             analysisStage: latestStage,
                             report: { ...draftReport, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) },
                             updatedAt: new Date().toISOString(),
                         });
                     },
-                },
-            );
+            });
             setDraftReportVisible(false);
-            onUpdateState(node.id, {
+            publishState({
                 ...baseState,
+                stageTaskIds: { ...stageTaskIds },
                 status: "completed",
                 analysisStage: "completed",
                 report: { ...report, modelLabel: modelOptionLabel(effectiveConfig, selectedCritiqueModel) },
@@ -235,14 +235,14 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             if (controller.signal.aborted) {
                 setActiveStage(undefined);
                 setDraftReportVisible(false);
-                onUpdateState(node.id, { ...baseState, status: "idle", analysisStage: undefined, errorCode: undefined, errorMessage: undefined, updatedAt: new Date().toISOString() });
+                publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, status: "failed", analysisStage: "failed", errorCode: "analysis_interrupted", errorMessage: "分析观察已停止；已提交阶段保留在任务中心，不会自动重复提交。", updatedAt: new Date().toISOString() });
                 return;
             }
             const errorMessage = error instanceof Error ? error.message : "AI 批改失败，请稍后重试";
             setActiveStage("failed");
             setDraftReportVisible(false);
             setLocalError(errorMessage);
-            onUpdateState(node.id, { ...baseState, status: "failed", analysisStage: "failed", errorCode: error instanceof Error ? error.message : "art_critique_failed", errorMessage, updatedAt: new Date().toISOString() });
+            publishState({ ...baseState, stageTaskIds: { ...stageTaskIds }, status: "failed", analysisStage: "failed", errorCode: error instanceof Error ? error.message : "art_critique_failed", errorMessage, updatedAt: new Date().toISOString() });
         } finally {
             if (abortRef.current === controller) abortRef.current = null;
             setRunning(false);

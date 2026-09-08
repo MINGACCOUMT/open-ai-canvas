@@ -143,6 +143,8 @@ type BackendToolGenerationOptions = {
     toolChoice: ToolChoice;
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
+    onTaskCreated?: (task: GenerationTask) => void;
+    metadata?: { source: string; nodeId?: string; runId?: string; stage?: string };
 };
 
 // 报价和执行复用完全相同的任务协议，准备阶段不提交模型任务。
@@ -174,7 +176,7 @@ export function prepareBackendToolGenerationTask(options: BackendToolGenerationO
             config: backendProviderConfig(options.config, "text"),
             agentRequests: buildBackendToolRequests(options.messages, options.tools, options.toolChoice, options.config),
             referenceImages: [...imageKeys].map((storageKey) => ({ storageKey })),
-            metadata: { source: "canvas-online-agent" },
+            metadata: options.metadata || { source: "canvas-online-agent" },
         },
     };
     if (new Blob([JSON.stringify(task)]).size > 15 * 1024 * 1024) {
@@ -185,6 +187,7 @@ export function prepareBackendToolGenerationTask(options: BackendToolGenerationO
 
 export async function runBackendToolGenerationTask(options: BackendToolGenerationOptions): Promise<ToolResponseResult> {
     const task = await createGenerationTask(prepareBackendToolGenerationTask(options));
+    options.onTaskCreated?.(task);
     const completed = await waitForGenerationTask(task.id, { signal: options.signal, initialTask: task, onTextDelta: options.onDelta });
     const result = parseBackendGenerationResult(completed);
     return {

@@ -4,10 +4,14 @@ import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "./canvas-agent-ops";
+import { createShortDramaPipeline } from "./canvas-short-drama";
+import { createStoryboardRow } from "./canvas-project-domain";
 
 export type CanvasWorkflowNodeKind =
     | "text"
     | "script"
+    | "styleboard"
+    | "story_input"
     | "image"
     | "video"
     | "audio"
@@ -28,6 +32,7 @@ export type CanvasWorkflowNodeInput = {
     runGeneration?: boolean;
     width?: number;
     height?: number;
+    shots?: Array<{ durationSeconds: number; videoMotionPrompt: string; dialogue?: string }>;
 };
 
 export type CanvasWorkflowInput = {
@@ -102,6 +107,18 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
                 ],
             } : {}),
         };
+        if (["styleboard", "story_input", "script"].includes(node.kind)) {
+            const template = createShortDramaPipeline({ x: 0, y: 0 });
+            const source = template.nodes[node.kind === "styleboard" ? 0 : node.kind === "story_input" ? 1 : 2];
+            Object.assign(metadata, source.metadata, { content: node.kind === "styleboard" ? "" : node.content || "", composerContent: prompt });
+            if (node.kind === "script") {
+                if (node.shots && (!Array.isArray(node.shots) || node.shots.length > 100)) throw new Error("分镜最多 100 行");
+                metadata.storyboard = { ...source.metadata!.storyboard!, rows: (node.shots || []).map((shot, rowIndex) => {
+                    if (!Number.isFinite(shot.durationSeconds) || shot.durationSeconds <= 0 || typeof shot.videoMotionPrompt !== "string" || !shot.videoMotionPrompt.trim()) throw new Error("每条分镜需要有效时长和视频提示词");
+                    return createStoryboardRow(rowIndex + 1, { id: `${id}:shot:${rowIndex + 1}`, durationSeconds: shot.durationSeconds, videoMotionPrompt: shot.videoMotionPrompt, dialogue: typeof shot.dialogue === "string" ? shot.dialogue : "" });
+                }) };
+            }
+        }
         ops.push({ type: "add_node", id, nodeType: type, title: node.title, position, width: size.width, height: size.height, metadata });
     });
 
@@ -113,20 +130,20 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
         const key = `${edge.from}\0${edge.to}`;
         if (edgeKeys.has(key)) continue;
         edgeKeys.add(key);
-        ops.push({ type: "connect_nodes", fromNodeId: ids.get(edge.from)!, toNodeId: ids.get(edge.to)! });
+        ops.push({ type: "connect_nodes", fromNodeId: ids.get(edge.from)!, toNodeId: ids.get(edge.to)!, ...(input.nodes.find((node) => node.ref === edge.to)?.kind === "script" ? { toHandleId: "storyboard:context" } : {}) });
     }
     for (const node of input.nodes) {
         for (const referenceRef of node.referenceRefs || []) {
             const key = `${referenceRef}\0${node.ref}`;
             if (edgeKeys.has(key)) continue;
             edgeKeys.add(key);
-            ops.push({ type: "connect_nodes", fromNodeId: ids.get(referenceRef)!, toNodeId: ids.get(node.ref)! });
+            ops.push({ type: "connect_nodes", fromNodeId: ids.get(referenceRef)!, toNodeId: ids.get(node.ref)!, ...(node.kind === "script" ? { toHandleId: "storyboard:context" } : {}) });
         }
         for (const referenceNodeId of node.referenceNodeIds || []) {
             const key = `${referenceNodeId}\0${node.ref}`;
             if (edgeKeys.has(key)) continue;
             edgeKeys.add(key);
-            ops.push({ type: "connect_nodes", fromNodeId: referenceNodeId, toNodeId: ids.get(node.ref)! });
+            ops.push({ type: "connect_nodes", fromNodeId: referenceNodeId, toNodeId: ids.get(node.ref)!, ...(node.kind === "script" ? { toHandleId: "storyboard:context" } : {}) });
         }
     }
     const targetIds = input.nodes.map((node) => ids.get(node.ref)!);
@@ -177,7 +194,8 @@ function nodeTypeForWorkflowKind(kind: CanvasWorkflowNodeKind) {
     if (kind === "image" || kind === "character_cards" || kind === "character_three_view") return CanvasNodeType.Image;
     if (kind === "video" || kind === "storyboard_video") return CanvasNodeType.Video;
     if (kind === "audio") return CanvasNodeType.Audio;
-    return CanvasNodeType.Text;
+    if (["text", "styleboard", "story_input"].includes(kind)) return CanvasNodeType.Text;
+    throw new Error(`未知工作流节点类型：${kind}`);
 }
 
 function nodeSize(type: CanvasNodeType, kind: CanvasWorkflowNodeKind, width?: number, height?: number) {
@@ -187,7 +205,7 @@ function nodeSize(type: CanvasNodeType, kind: CanvasWorkflowNodeKind, width?: nu
         : kind === "storyboard_video"
             ? { width: 640, height: 360 }
             : defaults;
-    return { width: width || preferred.width, height: height || preferred.height };
+    return { width: width || (kind === "styleboard" ? 360 : kind === "story_input" ? 420 : preferred.width), height: height || (kind === "styleboard" ? 220 : kind === "story_input" ? 260 : preferred.height) };
 }
 
 function workflowKindForNode(kind: CanvasWorkflowNodeKind): CanvasNodeMetadata["workflowKind"] {

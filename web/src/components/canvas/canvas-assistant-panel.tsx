@@ -13,6 +13,14 @@ import { nanoid } from "nanoid";
 import { type ResponseFunctionTool, type ResponseInputMessage, type ResponseToolCall } from "@/services/api/image";
 import { runBackendToolGenerationTask } from "@/services/api/generation-task";
 import { inspectAgentImage } from "@/services/agent-image-preview";
+import { AGENT_CAPABILITY_GUIDANCE, buildAgentPluginOperations, listAgentCapabilities, readAgentPluginDocumentation, readAgentPluginNode } from "@/services/agent-capabilities";
+import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { buildAgentStoryboardOperations, readAgentStoryboard } from "@/lib/canvas/canvas-agent-storyboard";
+import { canvasStylePresets, userStylePreset, type CanvasStylePreset } from "./canvas-style-picker-modal";
+import { listStyleProfiles } from "@/services/api/style-profiles";
+import { getActiveUserScope } from "@/lib/user-scope";
+import { isPluginEffectivelyEnabled } from "@/stores/use-plugin-store";
+import type { CanvasNodeTypeId } from "@/types/canvas";
 import { isCanvasGenerationDurableAckError, persistCanvasCinematicSessionContinuationEffect } from "@/services/canvas-generation-consumer";
 import { consumeGenerationTaskAgent } from "@/services/project-asset-sync";
 import { applyGenerationConsumerEffect, generationEffectApplied } from "@/services/generation-consumer-dedupe";
@@ -58,8 +66,8 @@ const ONLINE_AGENT_PROMPT =
 const JSON_RECORD_SCHEMA = { type: "object", additionalProperties: true };
 const POSITION_SCHEMA = { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x", "y"], additionalProperties: false };
 const VIEWPORT_SCHEMA = { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, k: { type: "number" } }, required: ["x", "y", "k"], additionalProperties: false };
-const NODE_TYPE_SCHEMA = { type: "string", enum: ["image", "text", "skill", "video", "audio"] };
-const WORKFLOW_NODE_KIND_SCHEMA = { type: "string", enum: ["text", "script", "image", "video", "audio", "character_cards", "character_three_view", "storyboard_video"] };
+const NODE_TYPE_SCHEMA = { type: "string", description: "使用 canvas_list_capabilities 返回的真实节点类型 id" };
+const WORKFLOW_NODE_KIND_SCHEMA = { type: "string", enum: ["text", "script", "styleboard", "story_input", "image", "video", "audio", "character_cards", "character_three_view", "storyboard_video"] };
 const GENERATION_MODE_SCHEMA = { type: "string", enum: ["text", "image", "video", "audio"] };
 const GENERATION_OPTION_PROPERTIES = {
     model: { type: "string" },
@@ -128,6 +136,14 @@ function generationToolDefinition(name: string, description: string, mode?: "tex
 }
 
 const ONLINE_AGENT_TOOLS: ResponseFunctionTool[] = [
+    toolDefinition("canvas_read_plugin_node", "读取已启用插件提供的真实节点状态与已有分析结果，不启动新任务。", { nodeId: { type: "string" } }, ["nodeId"]),
+    toolDefinition("canvas_list_styles", "读取真实项目画风目录；source=system 为系统预设，source=user 为当前用户保存的风格。返回 ID 和说明，不能编造 ID。", { source: { type: "string", enum: ["system", "user"] }, query: { type: "string" } }),
+    toolDefinition("canvas_apply_style", "应用从画风目录发现的真实风格，复用页面画风保存逻辑；关联项目时同步项目设置。已有画风且无需改变时直接沿用。", { source: { type: "string", enum: ["system", "user"] }, id: { type: "string" } }, ["source", "id"]),
+    toolDefinition("canvas_read_storyboard", "读取真实分镜行 ID、内容及已有素材关联，修改前先读取。", { nodeId: { type: "string" } }, ["nodeId"]),
+    toolDefinition("canvas_edit_storyboard", "按真实行 ID 新增、修改或移除分镜。patch 仅接受 durationSeconds 与镜头文本字段，不改素材 ID 或生成状态；移除行保留生成素材，不自动重新生成视频。", { nodeId: { type: "string" }, action: { type: "string", enum: ["append", "update", "remove"] }, rowId: { type: "string" }, patch: JSON_RECORD_SCHEMA }, ["nodeId", "action"]),
+    toolDefinition("canvas_read_plugin", "按发现的插件 id 读取当前版本用法文档。", { pluginId: { type: "string" } }, ["pluginId"]),
+    toolDefinition("canvas_plugin_action", "执行能力目录中插件已挂载的画布动作。input 遵循动作的 inputSchema；操作沿用画布确认、校验和结果记录。", { pluginId: { type: "string" }, actionId: { type: "string" }, input: JSON_RECORD_SCHEMA }, ["pluginId", "actionId", "input"]),
+    toolDefinition("canvas_list_capabilities", "发现当前已注册内置节点和已启用插件。返回真实类型、默认数据、输入约束与能力边界；query 可按业务名称检索。", { query: { type: "string" } }),
     ...CREATIVE_AGENT_TOOLS,
     ...skillRuntime.agentTools("onlineAgent"),
     toolDefinition("canvas_get_state", "读取当前网页画布的节点、连线、选区和视口。", {}),
@@ -171,6 +187,7 @@ const ONLINE_AGENT_TOOLS: ResponseFunctionTool[] = [
                         runGeneration: { type: "boolean" },
                         width: { type: "number" },
                         height: { type: "number" },
+                        shots: { type: "array", maxItems: 100, items: { type: "object", properties: { durationSeconds: { type: "number" }, videoMotionPrompt: { type: "string" }, dialogue: { type: "string" } }, required: ["durationSeconds", "videoMotionPrompt"], additionalProperties: false } },
                     },
                     required: ["ref", "kind", "title"],
                     additionalProperties: false,
@@ -186,7 +203,7 @@ const ONLINE_AGENT_TOOLS: ResponseFunctionTool[] = [
     ),
     toolDefinition(
         "canvas_create_node",
-        "创建任意类型节点：text、image、video、audio。适合创建文本、媒体占位或自定义 metadata 节点。",
+        "创建 canvas_list_capabilities 中已注册且可用的节点类型。使用返回的真实 id 和数据合同；专业短剧结构优先通过方案或 canvas_create_workflow 创建。",
         { nodeType: NODE_TYPE_SCHEMA, title: { type: "string" }, x: { type: "number" }, y: { type: "number" }, width: { type: "number" }, height: { type: "number" }, metadata: JSON_RECORD_SCHEMA },
         ["nodeType"],
     ),
@@ -268,6 +285,7 @@ type CanvasAssistantPanelProps = {
     onSelectNodeIds: (ids: Set<string>) => void;
     onSessionsChange: (sessions: CanvasAssistantSession[], activeSessionId: string | null) => void;
     onApplyOps: (ops?: CanvasAgentOp[], context?: { conversationId?: string; messageId?: string; source?: "online" | "local" }) => Promise<CanvasAgentSnapshot>;
+    onApplyStyle: (preset: CanvasStylePreset) => Promise<void>;
     canUndoOps: boolean;
     undoOpsCount: number;
     onUndoOps: () => CanvasAgentSnapshot | null;
@@ -359,6 +377,7 @@ export function CanvasAssistantPanel({
     onSelectNodeIds,
     onSessionsChange,
     onApplyOps,
+    onApplyStyle,
     canUndoOps,
     undoOpsCount,
     onUndoOps,
@@ -836,8 +855,31 @@ export function CanvasAssistantPanel({
             if (expectedRevision !== undefined && expectedRevision !== (current.revision ?? 0)) return { ok: false, message: "画布 revision 已变化，请重新读取 canvas_get_context 后再执行写操作。" };
             const expectedStateHash = typeof args.expectedStateHash === "string" ? args.expectedStateHash : "";
             if (expectedStateHash && expectedStateHash !== buildCanvasAgentContext(current).stateHash) return { ok: false, message: "画布状态已变化，请重新读取 canvas_get_context 后再执行写操作。" };
-            const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, composerSkills);
+            const currentSkills = skillRuntime.agentToolNames("onlineAgent").has(name) ? (await listAddedSkills()).skills : composerSkills;
+            const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, currentSkills);
             if (skillToolResult) return skillToolResult;
+            if (name === "canvas_read_plugin_node") return { ok: true, message: "已读取插件节点状态。", data: readAgentPluginNode(current, requireString(args.nodeId, "nodeId")) };
+            if (name === "canvas_read_storyboard") {
+                const { node, rows } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
+                return { ok: true, message: "已读取分镜表。", data: { nodeId: node.id, title: node.title, rows } };
+            }
+            if (name === "canvas_list_styles" || name === "canvas_apply_style") {
+                const originScope = getActiveUserScope();
+                const source = args.source || "system";
+                if (source !== "system" && source !== "user") throw new Error("画风来源必须是 system 或 user");
+                const presets = source === "system" ? canvasStylePresets.map((preset) => ({ id: preset.id, preset })) : (await listStyleProfiles()).profiles.flatMap((entity) => { const preset = userStylePreset(entity); return preset ? [{ id: entity.id, preset }] : []; });
+                if (getActiveUserScope() !== originScope || snapshotRef.current.projectId !== current.projectId || generationConsumerControllerRef.current.signal.aborted) throw new Error("画布或账号已切换，请重新读取画风");
+                if (name === "canvas_list_styles") {
+                    const query = typeof args.query === "string" ? args.query.toLocaleLowerCase().trim() : "";
+                    return { ok: true, message: "已读取画风目录。", data: presets.filter(({ preset }) => !query || `${preset.title} ${preset.description} ${preset.tags.join(" ")}`.toLocaleLowerCase().includes(query)).map(({ id, preset }) => ({ id, source, title: preset.title, description: preset.description, tags: preset.tags })) };
+                }
+                const selected = presets.find((item) => item.id === args.id);
+                if (!selected) throw new Error("画风不存在或已移除，请先读取真实画风目录");
+                await onApplyStyle(selected.preset);
+                return { ok: true, message: `已应用画风“${selected.preset.title}”。`, data: { source, id: selected.id, presetId: selected.preset.id, prompt: selected.preset.prompt } };
+            }
+            if (name === "canvas_read_plugin") return { ok: true, message: "已读取插件用法。", data: readAgentPluginDocumentation(requireString(args.pluginId, "pluginId")) };
+            if (name === "canvas_list_capabilities") return { ok: true, message: "已读取当前能力目录。", data: listAgentCapabilities(typeof args.query === "string" ? args.query : "") };
             if (name === "canvas_inspect_image") {
                 const readSignal = generationConsumerControllerRef.current.signal;
                 const node = current.nodes.find((item) => item.id === args.id && item.type === "image");
@@ -1500,6 +1542,8 @@ function parseToolArguments(value: string) {
 }
 
 export function onlineToolToOps(name: string, input: Record<string, unknown>, snapshot: CanvasAgentSnapshot, config: AiConfig): CanvasAgentOp[] {
+    if (name === "canvas_edit_storyboard") return buildAgentStoryboardOperations(snapshot, input);
+    if (name === "canvas_plugin_action") return buildAgentPluginOperations(requireString(input.pluginId, "pluginId"), requireString(input.actionId, "actionId"), recordOptional(input.input) || {}, snapshot);
     if (name === "canvas_apply_ops") return requireOps(input.ops);
     if (name === "canvas_create_workflow") return buildCanvasWorkflowOps(input as unknown as CanvasWorkflowInput, snapshot, config);
     if (name === "canvas_create_node") {
@@ -1652,7 +1696,7 @@ function runGenerationOp(nodeId: string, mode: "text" | "image" | "video" | "aud
 }
 
 function isWritableToolCall(call: ResponseToolCall) {
-    return !ONLINE_READ_TOOLS.has(call.function.name);
+    return !["canvas_list_capabilities", "canvas_read_plugin", "canvas_list_styles", "canvas_read_storyboard", "canvas_read_plugin_node"].includes(call.function.name) && !ONLINE_READ_TOOLS.has(call.function.name);
 }
 
 function toolCallsFromDetail(detail: Record<string, unknown>): ResponseToolCall[] {
@@ -1717,6 +1761,14 @@ function previewOnlineToolCalls(calls: ResponseToolCall[], snapshot: CanvasAgent
 }
 
 function toolCallLabel(name: string) {
+    if (name === "canvas_read_plugin_node") return "读取插件结果";
+    if (name === "canvas_list_styles") return "查找项目画风";
+    if (name === "canvas_apply_style") return "应用项目画风";
+    if (name === "canvas_read_storyboard") return "读取分镜表";
+    if (name === "canvas_edit_storyboard") return "调整分镜";
+    if (name === "canvas_list_capabilities") return "查找可用能力";
+    if (name === "canvas_read_plugin") return "读取插件用法";
+    if (name === "canvas_plugin_action") return "执行插件操作";
     if (name === "canvas_inspect_image") return "观察图片";
     if (name === "canvas_list_skills") return "列出技能";
     if (name === "canvas_get_skill") return "读取技能入口";
@@ -1818,9 +1870,10 @@ function requireNumber(value: unknown, field: string) {
     return value;
 }
 
-function requireNodeType(value: unknown): CanvasNodeType {
-    if (Object.values(CanvasNodeType).includes(value as CanvasNodeType)) return value as CanvasNodeType;
-    throw new Error("节点类型必须是 text、image、config、video 或 audio");
+function requireNodeType(value: unknown): CanvasNodeTypeId {
+    const definition = typeof value === "string" ? getNodeDefinition(value) : undefined;
+    if (definition && (!definition.plugin || isPluginEffectivelyEnabled(definition.plugin.pluginId))) return definition.type;
+    throw new Error("节点未注册或插件不可用，请先读取 canvas_list_capabilities");
 }
 
 function requireViewport(value: unknown) {
@@ -1970,7 +2023,7 @@ async function buildToolAgentMessages(snapshot: CanvasAgentSnapshot, history: Ca
     const executionGuidance = confirmTools
         ? "当前普通画布工具由程序展示执行确认。用户目标和操作范围明确时直接提交工具，程序会处理确认，不要在工具确认之前再用文字问一遍。"
         : "当前普通画布工具的逐次确认已关闭。用户请求范围内的操作可以直接调用，不要先征求重复授权；这不代表可以擅自扩大删除范围或跳过结构化方案、具体费用的批准。";
-    const systemContent = [ONLINE_AGENT_PROMPT, executionGuidance, creativeScenarioPrompt(seed.scene), skillCatalog ? `当前可按需加载的技能（仅元数据）：\n${skillCatalog}` : ""].filter(Boolean).join("\n\n");
+    const systemContent = [ONLINE_AGENT_PROMPT, AGENT_CAPABILITY_GUIDANCE, executionGuidance, creativeScenarioPrompt(seed.scene), skillCatalog ? `当前可按需加载的技能摘要（完整目录可调用 canvas_list_skills 检索）：\n${skillCatalog}` : ""].filter(Boolean).join("\n\n");
     return budgetCanvasAgentHistory(
         { role: "system", content: systemContent },
         history
