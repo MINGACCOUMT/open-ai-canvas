@@ -19,6 +19,11 @@ docs/content/docs/plugins/*
 docs/content/docs/backend/*
 !docs/content/docs/backend/task-runtime-stability.mdx
 !docs/content/docs/backend/newapi-channel-2.mdx
+!docs/content/docs/backend/creative-agent-runtime.mdx
+# Keep the creative Agent design versioned without unignoring generated docs.
+!docs/content/docs/overview/
+docs/content/docs/overview/*
+!docs/content/docs/overview/creative-agent-design.mdx
 .env*
 !.env.example
 data/

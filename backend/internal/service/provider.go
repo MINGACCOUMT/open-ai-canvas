@@ -61,6 +61,7 @@ type canvasTextOptions struct {
 }
 
 type agentToolRequests struct {
+	Canonical      *canonicalAgentRequest `json:"canonical,omitempty"`
 	Responses      map[string]interface{} `json:"responses"`
 	ChatCompletion map[string]interface{} `json:"chatCompletion"`
 	Claude         map[string]interface{} `json:"claude"`
@@ -435,6 +436,10 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		return runImageTask(ctx, input)
 	case "text":
 		if input.AgentRequests != nil {
+			input, err = resolveAgentResourcePlaceholders(input, true)
+			if err != nil {
+				return nil, err
+			}
 			return runAgentToolTask(ctx, input)
 		}
 		result, taskErr := runTextTask(ctx, input)
@@ -497,6 +502,16 @@ func providerPrefersMediaURLs(interfaceType string, input canvasGenerationInput)
 }
 
 func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	// Protocol expansion is transient and follows model routing and resource hydration.
+	// Never write the expanded bodies back into the persisted task input.
+	if input.AgentRequests != nil && input.AgentRequests.Canonical != nil {
+		_, declarative := agentProtocolAdapterForContext(ctx, input.Config.InterfaceType)
+		requests, err := expandCanonicalAgentRequest(input.AgentRequests.Canonical, input.Config, declarative)
+		if err != nil {
+			return nil, err
+		}
+		input.AgentRequests = requests
+	}
 	if adapter, ok := agentProtocolAdapterForContext(ctx, input.Config.InterfaceType); ok {
 		return runDeclarativeAgentTask(ctx, input, adapter)
 	}
@@ -511,6 +526,9 @@ func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[str
 		path = "/responses"
 		protocol = "responses"
 	} else if input.Config.InterfaceType == string(model.ChannelInterfaceClaudeAPI) {
+		if input.AgentRequests.Claude != nil {
+			request = input.AgentRequests.Claude
+		}
 		path = "/messages"
 		protocol = "claude-api"
 	}
@@ -518,7 +536,7 @@ func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[str
 		return nil, errors.New("画布 Agent 工具请求缺少协议参数")
 	}
 	body := cloneStringAnyMap(request)
-	if protocol == "claude-api" {
+	if protocol == "claude-api" && input.AgentRequests.Claude == nil {
 		body = claudeAgentBody(body)
 	}
 	body["model"] = input.Config.Model

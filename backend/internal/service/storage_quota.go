@@ -97,7 +97,11 @@ func validateStructuredReplacementQuotaWithPolicy(usage repository.UserStorageUs
 func (s *Service) createTaskWithinStorageQuota(task *model.Task, billingOrder *model.BillingOrder, policy RuntimePolicySetting) error {
 	s.storageMu.Lock()
 	defer s.storageMu.Unlock()
-	usage, err := s.repo.UserStorageUsage(task.UserID)
+	return createTaskWithStorageQuotaRepository(s.repo, task, billingOrder, policy)
+}
+
+func createTaskWithStorageQuotaRepository(repo *repository.Repository, task *model.Task, billingOrder *model.BillingOrder, policy RuntimePolicySetting) error {
+	usage, err := repo.UserStorageUsage(task.UserID)
 	if err != nil {
 		return err
 	}
@@ -106,9 +110,9 @@ func (s *Service) createTaskWithinStorageQuota(task *model.Task, billingOrder *m
 		return err
 	}
 	if billingOrder != nil {
-		return s.repo.CreateTaskWithCreditReservation(task, billingOrder, policy.Task.ActiveTaskLimit)
+		return repo.CreateTaskWithCreditReservation(task, billingOrder, policy.Task.ActiveTaskLimit)
 	}
-	return s.repo.CreateTaskWithActiveLimit(task, policy.Task.ActiveTaskLimit)
+	return repo.CreateTaskWithActiveLimit(task, policy.Task.ActiveTaskLimit)
 }
 
 // 任务完成会同时扩张任务历史和 Agent 会话数据，必须在同一临界区核算并原子写入。

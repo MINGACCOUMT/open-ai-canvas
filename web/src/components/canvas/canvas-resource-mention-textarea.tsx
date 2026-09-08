@@ -310,7 +310,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                         props.onDrop?.(event as unknown as React.DragEvent<HTMLTextAreaElement>);
                     }}
                     onKeyDown={(event: KeyboardEvent<HTMLDivElement>) => {
-                        if (event.key === "Enter" && (event.nativeEvent.isComposing || composingRef.current)) return;
+                        if (event.key === "Enter" && (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229)) return;
                         if (mention && candidates.length) {
                             if (event.key === "ArrowDown") {
                                 event.preventDefault();
@@ -413,7 +413,7 @@ export const CanvasResourceMentionTextarea = forwardRef<HTMLTextAreaElement, Pro
                     props.onCompositionEnd?.(event);
                 }}
                 onKeyDown={(event) => {
-                    if (event.key === "Enter" && (event.nativeEvent.isComposing || composingRef.current)) return;
+                    if (event.key === "Enter" && (event.nativeEvent.isComposing || composingRef.current || event.keyCode === 229)) return;
                     if (mention && candidates.length) {
                         if (event.key === "ArrowDown") {
                             event.preventDefault();

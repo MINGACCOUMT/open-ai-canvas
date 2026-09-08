@@ -443,10 +443,10 @@ export function AgentChatComposer({
                             value={prompt}
                             references={composerReferences}
                             includeAssetLibrary={includeAssetLibrary}
-                            sendOnEnter={false}
+                            sendOnEnter
                             disabled={disabled}
                             onChange={handlePromptChange}
-                            onSubmit={onSubmit}
+                            onSubmit={() => { if (canSubmit) onSubmit(); }}
                             className="w-full resize-none border-0 bg-transparent px-1 py-1 text-sm leading-5 outline-none placeholder:opacity-45"
                             containerClassName="min-h-[60px]"
                             style={{ color: theme.node.text }}
@@ -512,6 +512,7 @@ export function AgentChatComposer({
                         type="button"
                         disabled={!canSubmit}
                         aria-label={sending ? "发送中" : "发送"}
+                        title="回车发送，Shift+回车换行"
                         onClick={() => void onSubmit()}
                         whileHover={canSubmit && !reducedMotion ? { scale: 1.06, y: -1 } : undefined}
                         whileTap={canSubmit && !reducedMotion ? { scale: 0.9, y: 1 } : undefined}

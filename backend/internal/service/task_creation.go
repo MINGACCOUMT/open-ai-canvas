@@ -100,6 +100,15 @@ func (s *Service) CreateTask(userID string, req CreateTaskRequest) (*model.Task,
 	if err != nil {
 		return nil, err
 	}
+	if req.creationPrepare != nil {
+		encoded, encodeErr := json.Marshal(normalizedInput)
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		task.InputJSON = string(encoded)
+		req.creationPrepare.Order = billingOrder
+		return &task, nil
+	}
 	if err := s.protectTaskSecrets(normalizedInput); err != nil {
 		return nil, err
 	}

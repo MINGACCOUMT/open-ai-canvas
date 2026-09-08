@@ -123,6 +123,7 @@ func run(ctx context.Context) error {
 	handler.RegisterAdminSystemPerformanceRoutes(api, svc)
 	handler.RegisterAnnouncementRoutes(api, svc)
 	handler.RegisterFinanceRoutes(api, svc)
+	handler.RegisterCreationRoutes(api, svc)
 	handler.RegisterPaymentRoutes(api, svc)
 	handler.RegisterLibTVRoutes(api, svc)
 	handler.RegisterTapNowRoutes(api, svc)

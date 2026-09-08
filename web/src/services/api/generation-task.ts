@@ -1,7 +1,7 @@
 import { getMediaBlob } from "@/services/file-storage";
 import { getImageBlob } from "@/services/image-storage";
 import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
-import { createGenerationTask, waitForGenerationTask, type GenerationTask } from "@/services/api/task-center";
+import { createGenerationTask, waitForGenerationTask, type GenerationTask, type CreateTaskInput } from "@/services/api/task-center";
 import { LOCAL_DREAMINA_WAIT_STOPPED_CODE, LocalDreaminaGenerationClientError, runLocalDreaminaGenerationTask, type LocalDreaminaGenerationInput, type LocalDreaminaGenerationTask } from "@/services/local-dreamina-generation";
 import { isLocalDreaminaBackgroundTask, localDreaminaTaskId, projectLocalDreaminaTask, stripLocalDreaminaTaskPrefix } from "@/services/local-dreamina-task-projection";
 import { modelCapabilityConfigFor } from "@/lib/model-capabilities";
@@ -13,6 +13,7 @@ import { useLocalDreaminaModelStore } from "@/stores/use-local-dreamina-model-st
 import type { ReferenceImage } from "@/types/image";
 import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 import { buildBackendToolRequests, type ResponseFunctionTool, type ResponseInputMessage, type ToolChoice, type ToolResponseResult } from "@/services/api/image";
+import { assertAgentExchangeBudget } from "@/lib/canvas/canvas-agent-context-budget";
 
 export { logicalModelIDForConfig };
 
@@ -134,7 +135,7 @@ export async function submitBackendGenerationTask(
     return createBackendGenerationTask(options, prepared, dependencies);
 }
 
-export async function runBackendToolGenerationTask(options: {
+type BackendToolGenerationOptions = {
     prompt: string;
     config: AiConfig;
     messages: ResponseInputMessage[];
@@ -142,12 +143,26 @@ export async function runBackendToolGenerationTask(options: {
     toolChoice: ToolChoice;
     signal?: AbortSignal;
     onDelta?: (text: string) => void;
-}): Promise<ToolResponseResult> {
+};
+
+// 报价和执行复用完全相同的任务协议，准备阶段不提交模型任务。
+export function prepareBackendToolGenerationTask(options: BackendToolGenerationOptions): CreateTaskInput {
     throwIfAborted(options.signal);
+    assertAgentExchangeBudget(options.messages, options.tools, options.config.systemPrompt || "");
+    const imageKeys = new Set<string>();
+    for (const message of options.messages) {
+        if ("type" in message || message.role === "tool" || !Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+            if (part.type !== "image_url") continue;
+            const key = part.image_url.url;
+            if (!resourceIdFromStorageKey(key)) throw new Error("看图素材尚未保存为资源，请让助手重新读取图片后继续。");
+            imageKeys.add(key);
+        }
+    }
     const logicalModelId = logicalModelIDForConfig(options.config);
     const requestConfig = resolveModelRequestConfig(options.config, options.config.model);
     if (!logicalModelId && !requestConfig.channelId && !requestConfig.interfaceType) throw new Error("当前模型未选择可用请求协议");
-    const task = await createGenerationTask({
+    const task: CreateTaskInput = {
         type: "canvas_text",
         operation: "text",
         prompt: options.prompt,
@@ -156,11 +171,20 @@ export async function runBackendToolGenerationTask(options: {
         input: {
             mode: "text",
             prompt: options.prompt,
-            config: backendProviderConfig(options.config),
+            config: backendProviderConfig(options.config, "text"),
             agentRequests: buildBackendToolRequests(options.messages, options.tools, options.toolChoice, options.config),
+            referenceImages: [...imageKeys].map((storageKey) => ({ storageKey })),
             metadata: { source: "canvas-online-agent" },
         },
-    });
+    };
+    if (new Blob([JSON.stringify(task)]).size > 15 * 1024 * 1024) {
+        throw new Error("本次图片或对话内容过多，请减少参考图片，或新建会话后继续。已有作品会保留。");
+    }
+    return task;
+}
+
+export async function runBackendToolGenerationTask(options: BackendToolGenerationOptions): Promise<ToolResponseResult> {
+    const task = await createGenerationTask(prepareBackendToolGenerationTask(options));
     const completed = await waitForGenerationTask(task.id, { signal: options.signal, initialTask: task, onTextDelta: options.onDelta });
     const result = parseBackendGenerationResult(completed);
     return {
@@ -425,11 +449,27 @@ async function createAndWaitGenerationTask(options: BackendGenerationTaskOptions
 }
 
 async function createBackendGenerationTask(options: BackendGenerationTaskOptions, prepared: PreparedGenerationReferences, dependencies: GenerationTaskDependencies) {
-    const { projectId, mode, prompt, config, metadata, onTaskUpdate } = options;
+    const task = await dependencies.createTask(backendGenerationTaskInput(options, prepared));
+    options.onTaskUpdate?.(task);
+    return task;
+}
+
+export async function prepareBackendGenerationTask(options: BackendGenerationTaskOptions): Promise<CreateTaskInput> {
+    throwIfAborted(options.signal);
+    if (usesLocalDreamina(options.config)) throw new Error("智能创作的在线授权暂不支持本机即梦，请使用现有本机入口");
+    assertClientPromptLimit(options.mode, options.prompt, options.config, options.metadata);
+    assertBackendRuntimeConfigured(options.config, options.mode);
+    const prepared = await prepareGenerationReferences(options);
+    throwIfAborted(options.signal);
+    return backendGenerationTaskInput(options, prepared);
+}
+
+function backendGenerationTaskInput(options: BackendGenerationTaskOptions, prepared: PreparedGenerationReferences): CreateTaskInput {
+    const { projectId, mode, prompt, config, metadata } = options;
     const videoOperation = generationOperation(options);
     const workflow = resolveGenerationWorkflowExecution(config, mode);
     const logicalModelId = workflow ? "" : logicalModelIDForConfig(config);
-    const task = await dependencies.createTask({
+    return {
         ...(projectId ? { projectId } : {}),
         type: `canvas_${mode}`,
         operation: mode === "video" ? videoOperation : mode,
@@ -451,9 +491,7 @@ async function createBackendGenerationTask(options: BackendGenerationTaskOptions
             mask: prepared.mask,
             metadata: generationMetadata(config, metadata),
         },
-    });
-    onTaskUpdate?.(task);
-    return task;
+    };
 }
 
 function generationMetadata(config: AiConfig, metadata?: Record<string, unknown>) {

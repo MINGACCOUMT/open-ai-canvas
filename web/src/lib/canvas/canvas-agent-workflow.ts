@@ -50,7 +50,7 @@ const WORKFLOW_KINDS = new Set<CanvasWorkflowNodeKind>([
 const DEFAULT_GAP = 120;
 const WORKFLOW_PREFIX = "agent-workflow";
 
-export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: CanvasAgentSnapshot, config: AiConfig): CanvasAgentOp[] {
+export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: CanvasAgentSnapshot, config: AiConfig, identityPrefix?: string): CanvasAgentOp[] {
     if (!Array.isArray(input.nodes) || input.nodes.length === 0) throw new Error("工作流至少需要一个节点");
     const refs = new Set<string>();
     input.nodes.forEach((node) => {
@@ -75,7 +75,7 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
     const direction = input.direction || "horizontal";
     const gap = Math.max(48, input.gap ?? DEFAULT_GAP);
     const positions = layoutWorkflowNodes(input.nodes, snapshot, direction, gap, input.start);
-    const ids = new Map(input.nodes.map((node) => [node.ref, `${WORKFLOW_PREFIX}-${slug(node.ref)}-${nanoid(8)}`]));
+    const ids = new Map(input.nodes.map((node) => [node.ref, identityPrefix ? `${identityPrefix}:node:${encodeURIComponent(node.ref)}` : `${WORKFLOW_PREFIX}-${slug(node.ref)}-${nanoid(8)}`]));
     const ops: CanvasAgentOp[] = [];
 
     input.nodes.forEach((node, index) => {
@@ -105,7 +105,7 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
         ops.push({ type: "add_node", id, nodeType: type, title: node.title, position, width: size.width, height: size.height, metadata });
     });
 
-    const edges = input.edges?.length ? input.edges : input.nodes.slice(0, -1).map((node, index) => ({ from: node.ref, to: input.nodes[index + 1].ref }));
+    const edges = input.edges !== undefined ? input.edges : input.nodes.slice(0, -1).map((node, index) => ({ from: node.ref, to: input.nodes[index + 1].ref }));
     const edgeKeys = new Set<string>();
     for (const edge of edges) {
         if (!ids.has(edge.from) || !ids.has(edge.to)) throw new Error(`工作流连线引用不存在的节点：${edge.from} → ${edge.to}`);
@@ -138,7 +138,7 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
             if (shouldRun && generationModeForNode(type)) ops.push({ type: "run_generation", nodeId: ids.get(node.ref)!, mode: generationModeForNode(type)!, prompt: node.prompt || node.content || workflowPrompt(node.kind, node.title, input) || undefined });
         });
     }
-    return ops;
+    return identityPrefix ? ops.map((op) => op.type === "connect_nodes" ? { ...op, id: `${identityPrefix}:edge:${encodeURIComponent(op.fromNodeId)}:${encodeURIComponent(op.toNodeId)}` } : op) : ops;
 }
 
 function workflowPrompt(kind: CanvasWorkflowNodeKind, title: string, input: CanvasWorkflowInput) {
