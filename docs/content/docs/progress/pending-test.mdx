@@ -5,6 +5,12 @@ description: 当前项目已实现功能的手工验证清单与未确认边界
 
 # 待测试
 
+## v1.2.8.rc1 候选版本发布
+
+- 发布版本与镜像标签分别为 `v1.2.8.rc1` 和 `1.2.8.rc1`；GitHub Release 应标记为预发布，不能被当作正式版本推荐，也不覆盖已发布的 `latest`。
+- 待验证：前后端镜像的 Linux amd64/arm64 构建、Release 更新器附件与校验文件，以及实际部署后的版本展示和核心流程。本次发布不自动部署服务，构建成功不代表业务验收通过。
+- [ ] 拉取 `ghcr.io/ddcat-ai/open-ai-canvas-web:1.2.8.rc1` 与 `ghcr.io/ddcat-ai/open-ai-canvas-backend:1.2.8.rc1`，验证 amd64/arm64 manifest、容器内版本和提交信息，以及 `docker-compose.deploy.yml` 使用 `CANVAS_IMAGE_TAG=1.2.8.rc1` 启动。
+
 ## 框选工具栏精简与自适应整理
 
 - 多选悬浮栏默认只保留对齐、等距、分镜组和批量连接；横向/纵向/宫格/连线排列和引用组改到工具栏设置里，需要时再打开。
