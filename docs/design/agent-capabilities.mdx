@@ -15,6 +15,10 @@ description: 在线画布助手的节点发现、技能渐进读取和插件动�
 
 ## 专业短剧节点
 
+Agent 拆镜与分镜节点底部输入共用 `generateScriptRows`：调用 `canvas_generate_storyboard` 后，由现有 `agent_storyboard_rows` 任务结合画风、角色、画布资产和短剧技能生成真实行。原始剧本保存在 `composerContent`；没有节点时可用 `canvas_create_storyboard` 创建明确标为待拆镜的空表，此时不得宣称镜头已完成。此入口用于已获准的搭建任务，不取消创作方案确认；通用方案直接交付镜头时仍要求完整 `script.shots`。
+
+受管模型先用 `creation-runs` 准备真实报价，用户确认后批准并提交；外部自定义渠道沿用明确说明外部费用的提交确认，不伪造价格。整表重拆确认会说明替换镜头行、保留原媒体；取消或报价过期不提交。局部修改继续使用 `canvas_edit_storyboard`。专业拆镜完成后 Agent 继续读取真实表格检查，再进行后续操作；取消时停止本轮。单镜时长选项不表示总片长，总片长应在剧本要求中说明。
+
 创作方案和通用工作流支持 `styleboard`、`story_input`、`script`，复用手动短剧入口的数据结构。画风节点初始为空，显示系统已有的选择入口；故事节点使用专用编辑卡片；分镜节点使用真实表格。
 
 `script.shots` 必须逐镜填写正数 `durationSeconds` 和非空 `videoMotionPrompt`，`dialogue` 按需填写，最多 100 行，写入稳定行 ID。仅有正文或提示词的分镜方案会返回校验错误供模型修正；通用节点创建工具也校验真实分镜行，不能以空表代替交付。方案连到分镜节点时使用 `storyboard:context` 输入。仅创建这些节点不产生媒体生成项；图像、视频仍沿用既有方案和费用确认。

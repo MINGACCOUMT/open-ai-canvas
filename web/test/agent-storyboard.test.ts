@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { buildAgentStoryboardOperations, validateAgentStoryboardCreation } from "../src/lib/canvas/canvas-agent-storyboard";
+import { buildAgentStoryboardDraft, buildAgentStoryboardOperations, validateAgentStoryboardCreation } from "../src/lib/canvas/canvas-agent-storyboard";
 import { inspectStoryboardReadiness } from "../src/lib/canvas/canvas-storyboard-context";
 import { buildCanvasAgentContext } from "../src/lib/canvas/canvas-agent-context";
 import { createShortDramaPipeline } from "../src/lib/canvas/canvas-short-drama";
@@ -14,6 +14,16 @@ function fixture() {
     const snapshot: CanvasAgentSnapshot = { projectId: "test", title: "test", nodes: pipeline.nodes, connections: pipeline.connections, selectedNodeIds: [], viewport: { x: 0, y: 0, k: 1 } };
     return { snapshot, script };
 }
+
+test("待拆镜入口保存原始剧本但不伪造已完成的镜头", () => {
+    const { snapshot } = fixture();
+    const result = applyCanvasAgentOps(snapshot, buildAgentStoryboardDraft({ title: "旧机来电", prompt: "手机突然响起", x: 500, y: 100 }));
+    const node = result.nodes.find((item) => item.title === "旧机来电")!;
+    expect(node.type).toBe("script");
+    expect(node.metadata?.composerContent).toBe("手机突然响起");
+    expect(node.metadata?.storyboard?.rows).toEqual([]);
+    expect(node.metadata?.workflowDescription).toContain("尚未生成");
+});
 
 test("Agent 上下文提前指出未选择画风及分镜空行", () => {
     const { snapshot, script } = fixture();

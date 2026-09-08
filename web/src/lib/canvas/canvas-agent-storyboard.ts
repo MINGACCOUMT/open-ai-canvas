@@ -2,6 +2,14 @@ import type { CanvasAgentOp, CanvasAgentSnapshot } from "./canvas-agent-ops";
 import { createStoryboardRow } from "./canvas-project-domain";
 import type { StoryboardRow } from "@/types/canvas";
 import { inspectStoryboardReadiness } from "./canvas-storyboard-context";
+import { createShortDramaPipeline } from "./canvas-short-drama";
+
+export function buildAgentStoryboardDraft(input: { title: string; prompt: string; x: number; y: number }): CanvasAgentOp[] {
+    if (!input.title.trim() || !input.prompt.trim()) throw new Error("待拆镜节点需要标题和原始剧本");
+    const node = createShortDramaPipeline({ x: input.x - 180, y: input.y }).nodes[2];
+    return [{ type: "add_node", id: node.id, nodeType: node.type, title: input.title, position: node.position, width: node.width, height: node.height,
+        metadata: { ...node.metadata, composerContent: input.prompt, workflowDescription: "待专业拆镜，尚未生成镜头" } }];
+}
 
 const textFields = ["plotDescription", "dialogue", "videoMotionPrompt", "imageGenerationPrompt", "camera", "motion", "shotSize", "emotion", "lightingAndAtmosphere", "audioEffects", "narrativeIntent", "viewerPOV", "performanceBlocking", "timeBeats", "continuityOut", "negativePrompt"] as const;
 

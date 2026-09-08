@@ -2488,6 +2488,7 @@ function InfiniteCanvasPage() {
                                         onSessionsChange={handleAssistantSessionsChange}
                                         onApplyOps={applyAgentOps}
                                         onApplyStyle={applyCanvasStyleAsync}
+                                        onGenerateStoryboard={generateScriptRows}
                                         onStartArtCritique={(nodeId, restart) => {
                                             if (artCritiqueRunningRef.current) throw new Error("已有审美分析正在进行，请先完成或停止当前分析");
                                             setArtCritiqueStartRequest({ nodeId, id: nanoid(), restart });

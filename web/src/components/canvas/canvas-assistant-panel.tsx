@@ -15,7 +15,7 @@ import { runBackendToolGenerationTask } from "@/services/api/generation-task";
 import { inspectAgentImage } from "@/services/agent-image-preview";
 import { AGENT_CAPABILITY_GUIDANCE, buildAgentPluginOperations, listAgentCapabilities, readAgentPluginDocumentation, readAgentPluginNode } from "@/services/agent-capabilities";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
-import { buildAgentStoryboardOperations, readAgentStoryboard, validateAgentStoryboardCreation } from "@/lib/canvas/canvas-agent-storyboard";
+import { buildAgentStoryboardDraft, buildAgentStoryboardOperations, readAgentStoryboard, validateAgentStoryboardCreation } from "@/lib/canvas/canvas-agent-storyboard";
 import { canvasStylePresets, userStylePreset, type CanvasStylePreset } from "./canvas-style-picker-modal";
 import { listStyleProfiles } from "@/services/api/style-profiles";
 import { getActiveUserScope } from "@/lib/user-scope";
@@ -137,6 +137,8 @@ function generationToolDefinition(name: string, description: string, mode?: "tex
 
 const ONLINE_AGENT_TOOLS: ResponseFunctionTool[] = [
     toolDefinition("canvas_start_art_critique", "打开真实审美节点并准备分析报价，费用卡确认后才提交模型；不会由本工具批准费用。已有当前图片报告直接复用，只有用户明确要求重新分析才传 retry=true。", { nodeId: { type: "string" }, retry: { type: "boolean" } }, ["nodeId"]),
+    toolDefinition("canvas_create_storyboard", "创建待拆镜的专业分镜节点，将原始剧本放入底部输入框。此时表格为空，不能声称镜头已完成；随后调用 canvas_generate_storyboard。已有分镜节点优先复用。", { title: { type: "string" }, prompt: { type: "string" }, x: { type: "number" }, y: { type: "number" } }, ["title", "prompt"]),
+    toolDefinition("canvas_generate_storyboard", "使用分镜节点原有专业拆镜任务，结合项目画风、角色、素材及技能将剧本拆成真实镜头。程序展示费用与整表替换确认，确认后执行并等待结果；取消后不重复发起。局部修改使用 canvas_edit_storyboard。", { nodeId: { type: "string" }, prompt: { type: "string", description: "原始剧本与拆镜要求；省略时使用节点底部剧本" } }, ["nodeId"]),
     toolDefinition("canvas_read_plugin_node", "读取已启用插件提供的真实节点状态与已有分析结果，不启动新任务。", { nodeId: { type: "string" } }, ["nodeId"]),
     toolDefinition("canvas_list_styles", "读取真实项目画风目录；source=system 为系统预设，source=user 为当前用户保存的风格。返回 ID 和说明，不能编造 ID。", { source: { type: "string", enum: ["system", "user"] }, query: { type: "string" } }),
     toolDefinition("canvas_apply_style", "应用从画风目录发现的真实风格，复用页面画风保存逻辑；关联项目时同步项目设置。已有画风且无需改变时直接沿用。", { source: { type: "string", enum: ["system", "user"] }, id: { type: "string" } }, ["source", "id"]),
@@ -288,6 +290,7 @@ type CanvasAssistantPanelProps = {
     onApplyOps: (ops?: CanvasAgentOp[], context?: { conversationId?: string; messageId?: string; source?: "online" | "local" }) => Promise<CanvasAgentSnapshot>;
     onApplyStyle: (preset: CanvasStylePreset) => Promise<void>;
     onStartArtCritique: (nodeId: string, restart: boolean) => void;
+    onGenerateStoryboard: (nodeId: string, prompt: string, signal?: AbortSignal) => Promise<boolean | undefined>;
     canUndoOps: boolean;
     undoOpsCount: number;
     onUndoOps: () => CanvasAgentSnapshot | null;
@@ -381,6 +384,7 @@ export function CanvasAssistantPanel({
     onApplyOps,
     onApplyStyle,
     onStartArtCritique,
+    onGenerateStoryboard,
     canUndoOps,
     undoOpsCount,
     onUndoOps,
@@ -866,6 +870,14 @@ export function CanvasAssistantPanel({
             const currentSkills = skillRuntime.agentToolNames("onlineAgent").has(name) ? (await listAddedSkills()).skills : composerSkills;
             const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, currentSkills);
             if (skillToolResult) return skillToolResult;
+            if (name === "canvas_generate_storyboard") {
+                const { node, readiness } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
+                if (!readiness.canGenerateStoryboard) throw new Error(readiness.blockingReason || "请先配置项目画风");
+                const prompt = requireString(args.prompt ?? node.metadata?.composerContent, "剧本与拆镜要求");
+                const completed = await onGenerateStoryboard(node.id, prompt, generationConsumerControllerRef.current.signal);
+                if (!completed) return { ok: true, waitForUser: true, message: "分镜生成未完成或已取消，请查看节点提示；未完成不代表已生成，不要自动重复发起。", data: { nodeId: node.id, completed: false } };
+                return { ok: true, message: "专业拆镜任务已完成并写入真实分镜表。请读取分镜表检查时长与镜头内容，再继续后续操作。", data: { nodeId: node.id, completed: true } };
+            }
             if (name === "canvas_start_art_critique") {
                 const nodeId = requireString(args.nodeId, "nodeId");
                 const node = current.nodes.find((item) => item.id === nodeId && item.type === "ai-art-critique");
@@ -1562,6 +1574,7 @@ function parseToolArguments(value: string) {
 }
 
 export function onlineToolToOps(name: string, input: Record<string, unknown>, snapshot: CanvasAgentSnapshot, config: AiConfig): CanvasAgentOp[] {
+    if (name === "canvas_create_storyboard") return buildAgentStoryboardDraft({ title: requireString(input.title, "title"), prompt: requireString(input.prompt, "prompt"), x: numberOr(input.x, nextCanvasX(snapshot)), y: numberOr(input.y, 0) });
     if (name === "canvas_edit_storyboard") return buildAgentStoryboardOperations(snapshot, input);
     if (name === "canvas_plugin_action") return buildAgentPluginOperations(requireString(input.pluginId, "pluginId"), requireString(input.actionId, "actionId"), recordOptional(input.input) || {}, snapshot);
     if (name === "canvas_apply_ops") return validateAgentStoryboardCreation(requireOps(input.ops));
@@ -1781,6 +1794,8 @@ function previewOnlineToolCalls(calls: ResponseToolCall[], snapshot: CanvasAgent
 }
 
 function toolCallLabel(name: string) {
+    if (name === "canvas_create_storyboard") return "创建待拆镜分镜表";
+    if (name === "canvas_generate_storyboard") return "专业拆镜";
     if (name === "canvas_start_art_critique") return "准备审美分析";
     if (name === "canvas_read_plugin_node") return "读取插件结果";
     if (name === "canvas_list_styles") return "查找项目画风";
