@@ -206,3 +206,29 @@ func TestCustomRelayHTTPClientDoesNotFollowRedirects(t *testing.T) {
 		t.Fatal("redirect destination should not receive the request")
 	}
 }
+
+func TestAllowedPrivateUpstreamHostSupportsDomainSuffixPatterns(t *testing.T) {
+	t.Setenv("CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS", "sub2.koramkoin.cn,*.aliyuncs.com,.myqcloud.com")
+	for _, host := range []string{
+		"sub2.koramkoin.cn",
+		"aliyuncs.com",
+		"oss-cn-hangzhou.aliyuncs.com",
+		"bucket.oss-cn-nanjing.aliyuncs.com",
+		"cos.ap-nanjing.myqcloud.com",
+	} {
+		if !allowedPrivateUpstreamHost(host) {
+			t.Fatalf("allowedPrivateUpstreamHost(%q) = false", host)
+		}
+	}
+	for _, host := range []string{
+		"evil-aliyuncs.com",
+		"aliyuncs.com.evil.test",
+		"myqcloud.com", // leading-dot pattern excludes apex
+		"not-sub2.koramkoin.cn",
+		"127.0.0.1",
+	} {
+		if allowedPrivateUpstreamHost(host) {
+			t.Fatalf("allowedPrivateUpstreamHost(%q) = true", host)
+		}
+	}
+}
