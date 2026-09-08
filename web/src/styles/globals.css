@@ -959,7 +959,7 @@
     --page-topbar-border: var(--workspace-border);
     --canvas-topbar-surface: var(--workspace-glass-surface);
     /* Canvas 创建菜单：固定行高保证图标、徽标和单行标签互不挤占 */
-    --canvas-create-node-height: var(--space-12);
+    --canvas-create-node-height: var(--space-16);
     --canvas-create-resource-height: var(--space-8);
 
     /* Node 组件：节点首先是内容容器，常态不使用卡片投影或发光。 */
@@ -983,11 +983,12 @@
     --canvas-mention-menu-max-height: 320px;
     --canvas-mention-search-height: 38px;
     --canvas-mention-item-height: 38px;
-    --canvas-mention-chip-height: 1.68em;
-    --canvas-mention-chip-preview-size: 1.18em;
-    --canvas-mention-chip-gap: 0.18em;
-    --canvas-mention-chip-padding-inline: 0.22em;
-    --canvas-mention-chip-offset-y: 0.08em;
+    --canvas-mention-chip-height: 22px;
+    --canvas-mention-chip-preview-size: 18px;
+    --canvas-mention-chip-gap: 0.12em;
+    --canvas-mention-chip-padding-inline: 0.16em;
+    --canvas-mention-chip-offset-y: 0.14em;
+    --canvas-reference-chip-size: 44px;
 
     /* Modal 组件（对话框，对应 #98 面板层级）*/
     --modal-radius: var(--r-lg);
@@ -8038,7 +8039,29 @@
         background-image: linear-gradient(to bottom, color-mix(in srgb, var(--cn-frame-fill) 90%, transparent), var(--cn-frame-fill));
     }
 
-    .canvas-node-shell {
+.canvas-connection-create-description {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    pointer-events: none;
+    transition: grid-template-rows var(--motion-dur-base-calc) var(--motion-ease-out), opacity var(--motion-dur-base-calc) var(--motion-ease-out);
+}
+
+.canvas-connection-create-option[data-expanded="true"] .canvas-connection-create-description {
+    grid-template-rows: 1fr;
+    opacity: 1;
+}
+
+.canvas-connection-create-option[data-motion="reduced"] .canvas-connection-create-description,
+.no-motion .canvas-connection-create-description {
+    transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .canvas-connection-create-description { transition: none; }
+}
+
+.canvas-node-shell {
         box-shadow: none;
         transition: transform 160ms ease-out;
     }
@@ -9192,10 +9215,14 @@
     }
 
     .canvas-node-composer-reference-heading {
-        flex-shrink: 0;
-        margin-right: var(--space-1);
-        font-size: var(--fs-micro);
-        color: color-mix(in srgb, var(--cn-text) 65%, var(--canvas-composer-surface));
+        margin-left: 6px;
+        padding-left: 8px;
+        border-left: 1px solid color-mix(in srgb, var(--foreground) 12%, transparent);
+        font-size: var(--fs-tiny);
+        font-weight: 500;
+        line-height: 1;
+        color: color-mix(in srgb, var(--cn-text) 62%, var(--canvas-composer-surface));
+        white-space: nowrap;
     }
 
     .canvas-node-composer-icon-button:hover,
@@ -9218,56 +9245,91 @@
     }
 
     .canvas-node-composer-references {
+        display: block;
+        min-width: 0;
+        flex-shrink: 0;
+        padding: 6px 12px 10px;
+    }
+
+    .canvas-node-composer-references-track {
         display: flex;
         min-width: 0;
-        height: 36px;
-        flex-shrink: 0;
-        align-items: center;
-        gap: var(--space-1);
+        flex-wrap: nowrap;
+        align-items: stretch;
+        gap: 8px;
         overflow-x: auto;
-        padding-inline: var(--space-2);
+        overflow-y: hidden;
+        padding: 2px;
+        scroll-padding-inline: 2px;
     }
 
     .canvas-node-reference-chip {
         position: relative;
         display: inline-flex;
+        height: var(--canvas-reference-chip-size, 44px);
         min-width: 0;
-        height: 30px;
         flex: 0 0 auto;
-        align-items: center;
+        flex-direction: row;
+        align-items: stretch;
         overflow: visible;
         border-radius: var(--r-md);
         background: var(--canvas-composer-control-surface);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
     }
 
     .canvas-node-reference-preview {
-        width: 30px;
-        height: 30px;
-        flex: 0 0 30px;
+        position: relative;
+        width: var(--canvas-reference-chip-size, 44px);
+        height: var(--canvas-reference-chip-size, 44px);
+        flex: 0 0 var(--canvas-reference-chip-size, 44px);
         overflow: hidden;
         border: 0;
+        border-radius: var(--r-md) 0 0 var(--r-md);
         background: transparent;
         padding: 0;
+        cursor: zoom-in;
+    }
+
+    .canvas-node-reference-preview-hint {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: color-mix(in srgb, var(--color-neutral-950) 44%, transparent);
+        color: var(--color-neutral-0);
+        opacity: 0;
+        transition: opacity var(--motion-dur-fast) var(--motion-ease-out);
+        pointer-events: none;
+    }
+
+    .canvas-node-reference-chip:hover .canvas-node-reference-preview-hint,
+    .canvas-node-reference-preview:focus-visible .canvas-node-reference-preview-hint {
+        opacity: 1;
     }
 
     .canvas-node-reference-label {
         display: inline-flex;
-        max-width: 112px;
-        height: 30px;
+        max-width: 96px;
+        min-width: 0;
+        height: var(--canvas-reference-chip-size, 44px);
         align-items: center;
-        gap: var(--space-1);
+        gap: 2px;
         overflow: hidden;
         border: 0;
+        border-left: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
         background: transparent;
-        padding: 0 var(--space-2);
-        color: color-mix(in srgb, var(--foreground) 64%, transparent);
+        padding: 0 10px 0 8px;
+        color: color-mix(in srgb, var(--foreground) 72%, transparent);
+        cursor: pointer;
         font-size: var(--fs-tiny);
+        line-height: 1;
+        white-space: nowrap;
     }
 
-    .canvas-node-reference-label span {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+    .canvas-node-reference-label:hover,
+    .canvas-node-reference-label:focus-visible {
+        background: var(--canvas-composer-control-hover);
+        color: var(--foreground);
     }
 
     .canvas-node-reference-remove {

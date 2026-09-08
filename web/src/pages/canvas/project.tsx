@@ -2893,6 +2893,7 @@ function InfiniteCanvasPage() {
                         onMaskEdit={(node, payload) => void maskEditImageNode(node, payload)}
                         onSplit={(node, params) => void splitImageNode(node, params)}
                         onUpscale={(node, params) => void upscaleImageNode(node, params)}
+                        config={effectiveConfig}
                     />
 
                     <CanvasProjectStatusDialogs

@@ -226,6 +226,14 @@ export function buildOrderedCanvasResourceReferences(nodes: CanvasNodeData[], ac
     return labelResourceNodes(nodes.filter(isResourceNode), active);
 }
 
+export function imageGenerationReferenceConnections(sourceNodeId: string, targetNodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[], createId: () => string): CanvasConnection[] {
+    if (!sourceNodeId || sourceNodeId === targetNodeId) return [];
+    const existing = new Set(connections.filter((connection) => connection.toNodeId === targetNodeId).map((connection) => connection.fromNodeId));
+    return getMentionResourceNodes(sourceNodeId, nodes, connections)
+        .filter((node) => node.id !== sourceNodeId && node.id !== targetNodeId && !existing.has(node.id))
+        .map((node) => ({ id: createId(), fromNodeId: node.id, toNodeId: targetNodeId }));
+}
+
 export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {
     const configInputs = getConnectedConfigResourceNodes(nodeId, nodes, connections);
     if (configInputs.length) return configInputs;
