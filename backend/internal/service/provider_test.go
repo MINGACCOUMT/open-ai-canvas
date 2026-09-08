@@ -1081,7 +1081,7 @@ func TestRunGrokImageTaskUsesJSONEditContract(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "url" {
+		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "b64_json" {
 			t.Fatalf("request body = %#v", body)
 		}
 		// 单图走 image_url 字符串，兼容 OSS 强制下载头；不要用 image:{url,type}。

@@ -1788,10 +1788,12 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 		return grokImageRequest{}, "", errors.New("Grok 图片协议不支持蒙版编辑，请移除蒙版后重试")
 	}
 	body := grokImageRequest{
-		Model:          input.Config.Model,
-		Prompt:         withSystemPrompt(input.Config, input.Prompt),
-		N:              1,
-		ResponseFormat: "url",
+		Model:   input.Config.Model,
+		Prompt:  withSystemPrompt(input.Config, input.Prompt),
+		N:       1,
+		ResponseFormat: "b64_json",
+		// 部署服务器常直连不到 xAI 官方 CDN（imgen.x.ai），url 形态的结果需要后端
+		// 再下载必然超时；b64_json 让图片内嵌响应返回，彻底去掉外网下载依赖。
 		// Grok 图片协议用 aspect_ratio 表达画布比例；同时发送 size 会被上游按 OpenAI 枚举校验并拒绝。
 		AspectRatio: normalizeGrokImageAspectRatio(input.Config.Size),
 		Resolution:  normalizeGrokImageResolution(input.Config.Quality),
