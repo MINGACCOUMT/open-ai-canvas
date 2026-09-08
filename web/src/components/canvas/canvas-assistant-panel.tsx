@@ -15,7 +15,7 @@ import { runBackendToolGenerationTask } from "@/services/api/generation-task";
 import { inspectAgentImage } from "@/services/agent-image-preview";
 import { AGENT_CAPABILITY_GUIDANCE, buildAgentPluginOperations, listAgentCapabilities, readAgentPluginDocumentation, readAgentPluginNode } from "@/services/agent-capabilities";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
-import { buildAgentStoryboardOperations, readAgentStoryboard } from "@/lib/canvas/canvas-agent-storyboard";
+import { buildAgentStoryboardOperations, readAgentStoryboard, validateAgentStoryboardCreation } from "@/lib/canvas/canvas-agent-storyboard";
 import { canvasStylePresets, userStylePreset, type CanvasStylePreset } from "./canvas-style-picker-modal";
 import { listStyleProfiles } from "@/services/api/style-profiles";
 import { getActiveUserScope } from "@/lib/user-scope";
@@ -879,8 +879,8 @@ export function CanvasAssistantPanel({
             }
             if (name === "canvas_read_plugin_node") return { ok: true, message: "已读取插件节点状态。", data: readAgentPluginNode(current, requireString(args.nodeId, "nodeId")) };
             if (name === "canvas_read_storyboard") {
-                const { node, rows } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
-                return { ok: true, message: "已读取分镜表。", data: { nodeId: node.id, title: node.title, rows } };
+                const { node, rows, readiness } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
+                return { ok: true, message: "已读取分镜表及画风前置条件。", data: { nodeId: node.id, title: node.title, rows, readiness } };
             }
             if (name === "canvas_list_styles" || name === "canvas_apply_style") {
                 const originScope = getActiveUserScope();
@@ -1564,13 +1564,13 @@ function parseToolArguments(value: string) {
 export function onlineToolToOps(name: string, input: Record<string, unknown>, snapshot: CanvasAgentSnapshot, config: AiConfig): CanvasAgentOp[] {
     if (name === "canvas_edit_storyboard") return buildAgentStoryboardOperations(snapshot, input);
     if (name === "canvas_plugin_action") return buildAgentPluginOperations(requireString(input.pluginId, "pluginId"), requireString(input.actionId, "actionId"), recordOptional(input.input) || {}, snapshot);
-    if (name === "canvas_apply_ops") return requireOps(input.ops);
+    if (name === "canvas_apply_ops") return validateAgentStoryboardCreation(requireOps(input.ops));
     if (name === "canvas_create_workflow") return buildCanvasWorkflowOps(input as unknown as CanvasWorkflowInput, snapshot, config);
     if (name === "canvas_create_node") {
         const nodeType = requireNodeType(input.nodeType);
         const x = numberOr(input.x, nextCanvasX(snapshot));
         const y = numberOr(input.y, 0);
-        return [{ type: "add_node", nodeType, title: stringOptional(input.title), position: { x, y }, width: numberOptional(input.width), height: numberOptional(input.height), metadata: recordOptional(input.metadata) as CanvasNodeData["metadata"] }];
+        return validateAgentStoryboardCreation([{ type: "add_node", nodeType, title: stringOptional(input.title), position: { x, y }, width: numberOptional(input.width), height: numberOptional(input.height), metadata: recordOptional(input.metadata) as CanvasNodeData["metadata"] }]);
     }
     if (name === "canvas_create_text_node") return [textNodeOp(input, numberOr(input.x, nextCanvasX(snapshot)), numberOr(input.y, 0))];
     if (name === "canvas_create_text_nodes") {

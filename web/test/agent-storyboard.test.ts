@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { buildAgentStoryboardOperations } from "../src/lib/canvas/canvas-agent-storyboard";
+import { buildAgentStoryboardOperations, validateAgentStoryboardCreation } from "../src/lib/canvas/canvas-agent-storyboard";
+import { inspectStoryboardReadiness } from "../src/lib/canvas/canvas-storyboard-context";
+import { buildCanvasAgentContext } from "../src/lib/canvas/canvas-agent-context";
 import { createShortDramaPipeline } from "../src/lib/canvas/canvas-short-drama";
 import { createStoryboardRow } from "../src/lib/canvas/canvas-project-domain";
 import { applyCanvasAgentOps, type CanvasAgentSnapshot } from "../src/lib/canvas/canvas-agent-ops";
@@ -12,6 +14,33 @@ function fixture() {
     const snapshot: CanvasAgentSnapshot = { projectId: "test", title: "test", nodes: pipeline.nodes, connections: pipeline.connections, selectedNodeIds: [], viewport: { x: 0, y: 0, k: 1 } };
     return { snapshot, script };
 }
+
+test("Agent 上下文提前指出未选择画风及分镜空行", () => {
+    const { snapshot, script } = fixture();
+    const readiness = buildCanvasAgentContext(snapshot).storyboardReadiness;
+    expect(readiness.canGenerateStoryboard).toBe(false);
+    expect(readiness.style.ready).toBe(false);
+    expect(readiness.blockingReason).toContain("画风");
+    expect(readiness.storyboards.find((item) => item.nodeId === script.id)?.incompleteRowIds).toEqual(["row-1", "row-2"]);
+    expect(readiness.nextActions.join(" ")).toContain("canvas_apply_style");
+});
+
+test("已应用画风与真实分镜写入后，返回实际总时长", () => {
+    const { snapshot, script } = fixture();
+    const style = snapshot.nodes.find((node) => node.metadata?.workflowKind === "styleboard")!;
+    style.metadata = { ...style.metadata, stylePresetId: "preset", content: "电影写实" };
+    script.metadata!.storyboard!.rows = [2, 2, 3, 2, 1].map((durationSeconds, i) => createStoryboardRow(i + 1, { durationSeconds, videoMotionPrompt: `镜头${i + 1}` }));
+    const readiness = inspectStoryboardReadiness(snapshot.nodes);
+    expect(readiness.canGenerateStoryboard).toBe(true);
+    expect(readiness.storyboards[0]).toMatchObject({ rowCount: 5, populated: true, totalDurationSeconds: 10 });
+    expect(readiness.nextActions).toEqual([]);
+});
+
+test("通用节点创建不能用正文代替真实分镜行", () => {
+    expect(() => validateAgentStoryboardCreation([{ type: "add_node", nodeType: "script", metadata: { content: "镜头1：0–2秒近景；镜头2：2–4秒特写" } }])).toThrow("真实镜头行");
+    const { script } = fixture();
+    expect(() => validateAgentStoryboardCreation([{ type: "add_node", nodeType: "script", metadata: script.metadata }])).toThrow();
+});
 
 test("按行修改保留其他镜头及已有生成素材关联", () => {
     const { snapshot, script } = fixture();

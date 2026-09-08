@@ -10,7 +10,7 @@ import { CREATIVE_SCENARIOS, type CreativeAnswers, type CreativeBrief, type Crea
 
 export type CreativeReference = { id: string; title: string; kind: "image" | "text"; assetId?: string; storageKey?: string; text?: string; mimeType?: string; width?: number; height?: number };
 export type CreativeMessage = { id: string; role: "user" | "assistant"; text: string; question?: CreativeQuestionRequest; answers?: CreativeAnswers; proposal?: CreativeProposal };
-export type CreativeMediaState = { ref: string; nodeId: string; attempt: number; submissionId?: string; taskId?: string; status: "pending" | "queued" | "running" | "ready" | "failed" | "write_failed"; storageKey?: string; error?: string };
+export type CreativeMediaState = { ref: string; nodeId: string; attempt: number; submissionId?: string; taskId?: string; status: "pending" | "queued" | "running" | "ready" | "failed" | "write_failed"; storageKey?: string; error?: string; failureKind?: "generation" | "observation" };
 export type CreativeAgentState = {
     schemaVersion: 1; scene: CreativeScenarioId; brief: CreativeBrief; messages: CreativeMessage[];
     references: CreativeReference[]; selectedSkillIds: string[]; textModel?: string;
@@ -70,6 +70,7 @@ export function normalizeCreativeProposal(raw: unknown, id: string, version: num
         if (!assetId && (["text", "story_input"].includes(kind) ? !content : ["image", "video"].includes(kind) && !prompt)) throw new Error("文本节点需要正文，媒体节点需要生成提示词");
         const shots = Array.isArray(node.shots) ? node.shots.map((value) => { const shot = record(value); const durationSeconds = Number(shot.durationSeconds); if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error("分镜时长必须大于零"); return { durationSeconds, videoMotionPrompt: required(shot.videoMotionPrompt, "分镜视频提示词"), dialogue: str(shot.dialogue) }; }) : undefined;
         if (shots && shots.length > 100) throw new Error("分镜最多 100 行");
+        if (kind === "script" && !shots?.length) throw new Error("分镜方案必须提供非空 script.shots，每镜填写 durationSeconds 和 videoMotionPrompt；请把已设计镜头转成真实行，不能只填 content 或 prompt");
         return { ref: required(node.ref, "节点引用"), kind: kind as "text" | "image" | "video" | "styleboard" | "story_input" | "script", title: required(node.title, "节点标题"), content, prompt, shots, runGeneration: false, referenceRefs: Array.isArray(node.referenceRefs) ? node.referenceRefs.map(String) : [], referenceNodeIds: Array.isArray(node.referenceNodeIds) ? node.referenceNodeIds.map(String) : [] };
     });
     const refs = new Set(nodes.map((node) => node.ref));

@@ -1,13 +1,23 @@
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "./canvas-agent-ops";
 import { createStoryboardRow } from "./canvas-project-domain";
 import type { StoryboardRow } from "@/types/canvas";
+import { inspectStoryboardReadiness } from "./canvas-storyboard-context";
 
 const textFields = ["plotDescription", "dialogue", "videoMotionPrompt", "imageGenerationPrompt", "camera", "motion", "shotSize", "emotion", "lightingAndAtmosphere", "audioEffects", "narrativeIntent", "viewerPOV", "performanceBlocking", "timeBeats", "continuityOut", "negativePrompt"] as const;
+
+export function validateAgentStoryboardCreation(ops: CanvasAgentOp[]) {
+    for (const op of ops) {
+        if (op.type !== "add_node" || op.nodeType !== "script") continue;
+        const rows = op.metadata?.storyboard?.rows;
+        if (!Array.isArray(rows) || !rows.length || rows.length > 100 || rows.some((row) => !Number.isFinite(row.durationSeconds) || row.durationSeconds <= 0 || !row.videoMotionPrompt?.trim())) throw new Error("分镜节点必须包含真实镜头行。请使用 canvas_create_workflow 的 script.shots 填写每镜时长和视频提示词，不能仅填正文；已有分镜使用 canvas_edit_storyboard");
+    }
+    return ops;
+}
 
 export function readAgentStoryboard(snapshot: CanvasAgentSnapshot, nodeId: string) {
     const node = snapshot.nodes.find((item) => item.id === nodeId && item.type === "script");
     if (!node) throw new Error("未找到当前画布的分镜脚本节点，请先查找真实节点");
-    return { node, rows: node.metadata?.storyboard?.rows || [] };
+    return { node, rows: node.metadata?.storyboard?.rows || [], readiness: inspectStoryboardReadiness(snapshot.nodes) };
 }
 
 export function buildAgentStoryboardOperations(snapshot: CanvasAgentSnapshot, input: Record<string, unknown>): CanvasAgentOp[] {

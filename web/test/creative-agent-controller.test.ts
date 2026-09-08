@@ -30,6 +30,56 @@ const proposal = { id: "p", version: 1, title: "方案", summary: "摘要", mark
 const submission = (id: string, itemKey: string, taskId?: string): CreationSubmission => ({ id, runId: "run", itemKey, requestHash: "hash", taskId, quote: { model: "model", billingMode: "fixed_request", quantity: 1, amountMicrocredits: 1, estimated: false, expiresAt: "2099-01-01", quoteHash: "quote" } });
 
 describe("创作控制器恢复", () => {
+    for (const terminal of [true, false]) test(terminal ? "任务已失败时标记生成失败，不能引导反复读取" : "仅查询断线时保留结果恢复语义，不当作需要重做", async () => {
+        const h = harness({ ...initialCreativeState(), proposal, canvasApplied: true, media: [{ ref: "a", nodeId: "a", attempt: 1, submissionId: "a", taskId: "a", status: "queued" }] }, "waiting_task", [submission("a", "a", "a")], async (_id, options) => {
+            if (terminal) options?.onTaskUpdate?.({ id: "a", status: "failed" } as GenerationTask);
+            throw new Error("网络异常。");
+        });
+        try { await h.controller.load("run"); await expect(h.controller.resume()).rejects.toThrow(); expect(h.view().state.media[0].failureKind).toBe(terminal ? "generation" : "observation"); expect(h.counters().executions).toBe(0); }
+        finally { h.controller.dispose(); }
+    });
+    test("刷新页面可接续仍有效的旧连接，不等待旧页面租约过期", async () => {
+        const h = harness(initialCreativeState());
+        const get = h.api.get, claim = h.api.claim;
+        let foreign = true, claims = 0;
+        h.api.get = async (...args) => { const detail = await get(...args); return foreign ? { ...detail, run: { ...detail.run, executionOwner: "previous-page", leaseExpiresAt: "2099-01-01" } } : detail; };
+        h.api.claim = async (...args) => { claims++; foreign = false; return claim(...args); };
+        try { await h.controller.load("run"); expect(h.view().hasControl).toBe(true); expect(claims).toBe(1); expect(h.counters().executions).toBe(0); }
+        finally { h.controller.dispose(); }
+    });
+    test("普通恢复不争抢其他连接，用户重试连接可以显式接续", async () => {
+        const h = harness(initialCreativeState());
+        const get = h.api.get, claim = h.api.claim;
+        let foreign = false, claims = 0;
+        h.api.get = async (...args) => { const detail = await get(...args); return foreign ? { ...detail, run: { ...detail.run, executionOwner: "other-page", leaseExpiresAt: "2099-01-01" } } : detail; };
+        h.api.claim = async (...args) => { claims++; foreign = false; return claim(...args); };
+        try {
+            await h.controller.load("run"); foreign = true;
+            await expect(h.controller.refresh()).rejects.toThrow("重试连接"); expect(claims).toBe(1);
+            await h.controller.takeControl(); expect(claims).toBe(2); expect(h.view().hasControl).toBe(true); expect(h.view().error).toBeUndefined();
+        } finally { h.controller.dispose(); }
+    });
+    test("已提交任务即使保留待处理批次也不能再次展示费用确认", async () => {
+        const h = harness({ ...initialCreativeState(), proposal, canvasApplied: true, pendingPayment: ["a"], media: [{ ref: "a", nodeId: "a", attempt: 1, submissionId: "a", taskId: "task-a", status: "queued" }] }, "waiting_task", [{ ...submission("a", "a", "task-a"), approvedAt: "2026-01-01" }]);
+        try { await h.controller.load("run"); expect(h.view().quote).toBeUndefined(); }
+        finally { h.controller.dispose(); }
+    });
+    test("部分提交后费用卡只保留未提交项", async () => {
+        const h = harness({ ...initialCreativeState(), pendingPayment: ["a", "b"] }, "paused", [submission("a", "a", "task-a"), submission("b", "b")]);
+        try { await h.controller.load("run"); expect(h.view().quote?.items.map((item) => item.id)).toEqual(["b"]); }
+        finally { h.controller.dispose(); }
+    });
+    test("迟到的确认点击复用已提交任务，不重新批准或刷新过期费用", async () => {
+        const old = { ...submission("a", "a", "task-a"), approvedAt: "2000-01-01" };
+        old.quote.expiresAt = "2000-01-01";
+        const completed = { id: "task-a", status: "succeeded", resultJson: JSON.stringify({ images: [{ storageKey: "resource:output" }] }) } as GenerationTask;
+        const h = harness({ ...initialCreativeState(), proposal, canvasApplied: true, pendingPayment: ["a"], media: [{ ref: "a", nodeId: "a", attempt: 1, submissionId: "a", taskId: "task-a", status: "queued" }] }, "waiting_task", [old], async () => completed);
+        h.api.approve = async () => { throw new Error("不应重新批准已提交任务"); };
+        h.api.refreshQuote = async () => { throw new Error("不应刷新已提交任务报价"); };
+        h.api.execute = async (_id, input) => { expect(input.submissionId).toBe("a"); return completed; };
+        try { await h.controller.load("run"); await h.controller.approvePayment(); expect(h.view().state.media[0].status).toBe("ready"); expect(h.view().quote).toBeUndefined(); expect(h.counters().prepares).toBe(0); }
+        finally { h.controller.dispose(); }
+    });
     test("更新过期报价替换分析关联并等待新批准，不执行模型", async () => {
         const old = submission("old", "planning:key");
         const fresh = submission("fresh", "requote:old");

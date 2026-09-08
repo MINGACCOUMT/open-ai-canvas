@@ -2,6 +2,7 @@ import { hashCanvasAgentSnapshot, type CanvasAgentOp, type CanvasAgentSnapshot }
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { getNodeDefinition } from "./node-registry";
 import { isPluginEffectivelyEnabled } from "@/stores/use-plugin-store";
+import { inspectStoryboardReadiness } from "./canvas-storyboard-context";
 
 export type CanvasAgentResource = {
     nodeId: string;
@@ -47,6 +48,7 @@ export function buildCanvasAgentContext(snapshot: CanvasAgentSnapshot, options: 
         nodes: nodes.map(compactNode),
         connections: snapshot.connections.map((connection) => ({ id: connection.id, fromNodeId: connection.fromNodeId, fromTitle: nodeById.get(connection.fromNodeId)?.title || "未知节点", toNodeId: connection.toNodeId, toTitle: nodeById.get(connection.toNodeId)?.title || "未知节点", fromHandleId: connection.fromHandleId, toHandleId: connection.toHandleId })),
         resources,
+        storyboardReadiness: inspectStoryboardReadiness(snapshot.nodes),
         warnings: [
             ...(nodes.some((node) => node.metadata?.status === "error") ? ["画布中存在生成失败节点；重试前先检查错误信息。"] : []),
             ...(resources.some((resource) => !resource.ready) ? ["存在未就绪或缺少持久化引用的媒体节点，不要把占位节点当作可用参考素材。"] : []),

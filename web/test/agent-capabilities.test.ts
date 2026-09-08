@@ -5,10 +5,17 @@ import { listAgentCapabilities, buildAgentPluginOperations } from "../src/servic
 import { applyCanvasAgentOps, type CanvasAgentSnapshot } from "../src/lib/canvas/canvas-agent-ops";
 import { normalizeCreativeProposal, creativeProposalOps } from "../src/lib/creation/creative-agent-state";
 import { defaultConfig } from "../src/stores/use-config-store";
+import { buildCanvasWorkflowOps } from "../src/lib/canvas/canvas-agent-workflow";
 
 const snapshot: CanvasAgentSnapshot = { projectId: "test", title: "test", nodes: [], connections: [], selectedNodeIds: [], viewport: { x: 0, y: 0, k: 1 } };
 const pluginId = "agent-extension-test";
 afterEach(() => { unregisterPlugin(pluginId); usePluginStore.setState({ runtimeStatuses: {} }); });
+
+test("方案与直接工作流均拒绝只有正文的分镜", () => {
+    const nodes = [{ ref: "shots", kind: "script" as const, title: "10秒分镜", content: "0–2秒近景，2–10秒特写" }];
+    expect(() => normalizeCreativeProposal({ title: "短剧", summary: "分镜", markdown: "方案", workflow: { nodes, edges: [] }, generationItems: [] }, "p", 1, defaultConfig)).toThrow("script.shots");
+    expect(() => buildCanvasWorkflowOps({ nodes, edges: [] }, snapshot, defaultConfig)).toThrow("shots");
+});
 
 test("专业方案创建可编辑分镜与上下文连线，不伪造画风已选择或收费任务", () => {
     const proposal = normalizeCreativeProposal({ title: "短剧", summary: "搭建", markdown: "完整方案", workflow: { nodes: [

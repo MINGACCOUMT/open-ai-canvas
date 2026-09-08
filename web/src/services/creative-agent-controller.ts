@@ -52,11 +52,11 @@ export class CreativeAgentController {
         this.run = await this.api.save(this.run!.id, { ...guard, revision: this.run!.revision, status, state: this.state as unknown as Record<string, unknown> }, this.abort.signal);
         this.assertLive(); this.emit();
     }
-    private async action(operation: () => Promise<void>) {
+    private async action(operation: () => Promise<void>, takeOver = false) {
         if (this.busy) throw new Error("上一项操作仍在处理，请稍候");
         if (this.disposed || this.scope !== getActiveUserScope()) throw new DOMException("页面已关闭", "AbortError");
         this.busy = true; this.error = undefined; this.emit();
-        try { if (this.run) await this.ensureControl(); await operation(); }
+        try { if (this.run) await this.ensureControl(takeOver); await operation(); }
         catch (error) {
             if (!this.disposed && !(error instanceof DOMException && error.name === "AbortError")) { this.error = error instanceof Error ? error.message : "操作未完成"; this.emit(); }
             throw error;
@@ -70,7 +70,7 @@ export class CreativeAgentController {
             this.assertLive();
             if (!readOnly) {
                 this.startHeartbeat();
-                await this.ensureControl();
+                await this.ensureControl(true);
             }
             this.emit();
         });
@@ -85,7 +85,11 @@ export class CreativeAgentController {
         this.heartbeat = setInterval(() => {
             if (this.disposed || !this.run) return;
             if (!this.hasControl) {
-                if (!this.busy) void this.ensureControl().then(() => { this.error = undefined; this.emit(); }).catch(() => undefined);
+                if (!this.busy) void this.ensureControl().then(() => { this.error = undefined; this.emit(); }).catch((error) => {
+                    if (this.disposed) return;
+                    this.error = error instanceof Error ? error.message : "连接恢复失败，请重试";
+                    this.emit();
+                });
                 return;
             }
             if (this.abort.signal.aborted) return;
@@ -95,16 +99,20 @@ export class CreativeAgentController {
         }, 15_000);
     }
     private restoring?: Promise<void>;
-    private async ensureControl() {
+    private async ensureControl(takeOver = false): Promise<void> {
         if (this.hasControl && !this.abort.signal.aborted && Date.parse(this.run?.leaseExpiresAt || "") > Date.now() + 3000) return;
-        if (this.restoring) return this.restoring;
+        if (this.restoring) {
+            if (!takeOver) return this.restoring;
+            try { await this.restoring; } catch { /* Explicit reconnect retries after the passive recovery attempt. */ }
+            return this.ensureControl(true);
+        }
         this.restoring = (async () => {
             if (this.disposed || this.scope !== getActiveUserScope()) throw new DOMException("页面已关闭", "AbortError");
             if (this.abort.signal.aborted) this.abort = new AbortController();
             const detail = await this.api.get(this.run!.id, this.abort.signal);
             this.assertLive();
             const run = detail.run;
-            if (run.executionOwner && run.executionOwner !== this.owner && Date.parse(run.leaseExpiresAt || "") > Date.now()) throw new Error("正在恢复当前创作，请稍候再继续。");
+            if (!takeOver && run.executionOwner && run.executionOwner !== this.owner && Date.parse(run.leaseExpiresAt || "") > Date.now()) throw new Error("当前创作连接已切换，请点击重试连接继续。");
             // Only replace the lease here; never overwrite local edits or unknown submission results.
             this.run = { ...this.run!, executionOwner: run.executionOwner, executionEpoch: run.executionEpoch, leaseExpiresAt: run.leaseExpiresAt };
             await this.claim();
@@ -113,7 +121,7 @@ export class CreativeAgentController {
     }
     async takeControl() {
         if (this.disposed) return;
-        await this.action(async () => { this.accept(await this.api.get(this.run!.id, this.abort.signal)); });
+        await this.action(async () => { this.accept(await this.api.get(this.run!.id, this.abort.signal)); }, true);
     }
     async refresh() { await this.action(async () => { this.accept(await this.api.get(this.run!.id, this.abort.signal)); }); }
     dispose() {
@@ -219,7 +227,8 @@ export class CreativeAgentController {
     }
     private upsertSubmission(submission: CreationSubmission) { this.submissions = [...this.submissions.filter((item) => item.id !== submission.id), submission]; }
     private quote(): CreativeQuote | undefined {
-        const pending = this.state.pendingPayment?.map((id) => this.submissions.find((item) => item.id === id)).filter((item): item is CreationSubmission => Boolean(item));
+        // pendingPayment also retains submitted IDs for recovery; only unsubmitted items need a fee card.
+        const pending = this.state.pendingPayment?.map((id) => this.submissions.find((item) => item.id === id)).filter((item): item is CreationSubmission => Boolean(item && !item.taskId && !item.revokedAt));
         if (!pending?.length) return undefined;
         const amount = pending.reduce((sum, item) => sum + item.quote.amountMicrocredits, 0);
         const estimated = pending.some((item) => item.quote.estimated);
@@ -235,8 +244,12 @@ export class CreativeAgentController {
         await this.action(async () => {
             const ids = this.state.pendingPayment;
             if (!ids?.length) throw new Error("当前没有待批准费用");
-            const result = await this.api.approve(this.run!.id, { ...this.guard(), submissionIds: ids }, this.abort.signal);
-            result.submissions.forEach((item) => this.upsertSubmission(item));
+            const unapproved = ids.filter((id) => { const item = this.submissions.find((item) => item.id === id); return item && !item.taskId && !item.approvedAt && !item.revokedAt; });
+            if (this.run!.status === "paused") await this.save("waiting_payment");
+            if (unapproved.length) {
+                const result = await this.api.approve(this.run!.id, { ...this.guard(), submissionIds: unapproved }, this.abort.signal);
+                result.submissions.forEach((item) => this.upsertSubmission(item));
+            }
             await this.executeApproved(ids);
         });
     }
@@ -433,11 +446,12 @@ export class CreativeAgentController {
     }
     private async observeMedia(media: CreativeMediaState) {
         let task: GenerationTask;
+        let observedStatus: GenerationTask["status"] | undefined;
         try {
-            task = await this.waitTask(media.taskId!, { signal: this.abort.signal, onTaskUpdate: (task) => { if (!this.disposed) this.setMedia(media.ref, { status: task.status === "queued" ? "queued" : "running" }); } });
+            task = await this.waitTask(media.taskId!, { signal: this.abort.signal, onTaskUpdate: (task) => { observedStatus = task.status; if (!this.disposed) this.setMedia(media.ref, { status: task.status === "queued" ? "queued" : "running" }); } });
         } catch (error) {
             if (this.abort.signal.aborted) throw error;
-            this.setMedia(media.ref, { status: "failed", error: error instanceof Error ? error.message : "生成失败" }); await this.save("paused"); throw error;
+            this.setMedia(media.ref, { status: "failed", failureKind: observedStatus === "failed" || observedStatus === "cancelled" ? "generation" : "observation", error: error instanceof Error ? error.message : "生成失败" }); await this.save("paused"); throw error;
         }
         this.guard();
         try {

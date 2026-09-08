@@ -112,6 +112,7 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
             const source = template.nodes[node.kind === "styleboard" ? 0 : node.kind === "story_input" ? 1 : 2];
             Object.assign(metadata, source.metadata, { content: node.kind === "styleboard" ? "" : node.content || "", composerContent: prompt });
             if (node.kind === "script") {
+                if (!node.shots?.length) throw new Error("创建分镜工作流必须提供非空 shots，请把镜头逐行填写 durationSeconds、videoMotionPrompt、dialogue，不能仅写正文");
                 if (node.shots && (!Array.isArray(node.shots) || node.shots.length > 100)) throw new Error("分镜最多 100 行");
                 metadata.storyboard = { ...source.metadata!.storyboard!, rows: (node.shots || []).map((shot, rowIndex) => {
                     if (!Number.isFinite(shot.durationSeconds) || shot.durationSeconds <= 0 || typeof shot.videoMotionPrompt !== "string" || !shot.videoMotionPrompt.trim()) throw new Error("每条分镜需要有效时长和视频提示词");
