@@ -1288,6 +1288,68 @@ func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
 	}
 }
 
+// TestRunXAIImageTaskRetriesTransientUpstreamError 锁定聚合网关偶发瞬时 5xx 的行为
+// （GROK 踩坑笔记第五节）：图片创建请求遇到 502/503/504/524 应短退避重试，
+// 而不是让整条任务直接失败。
+func TestRunXAIImageTaskRetriesTransientUpstreamError(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"Upstream service temporarily unavailable","type":"upstream_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v, want transient 502 retried", err)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (initial + retry)", calls)
+	}
+	images, _ := result["images"].([]map[string]string)
+	if len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+// TestRunXAIImageTaskDoesNotRetryClientError 客户端错误（如 400/422）必须立即失败，
+// 重试只会浪费配额并重复同样的拒收。
+func TestRunXAIImageTaskDoesNotRetryClientError(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request","type":"invalid_request_error"}}`))
+	}))
+	defer server.Close()
+
+	_, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err == nil {
+		t.Fatalf("runImageTask() error = nil, want 400 surfaced")
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no retry on 4xx)", calls)
+	}
+}
+
 // TestXAIImageBodyUsesReferenceImageShape 验证单图走 image_url 字符串、多图走 prompt:{text,images} 对象。
 // 单图不用 image:{url,type}：OSS 签名 URL 带 attachment 时该形态会被上游 400。
 // 多图不在顶层发 images 数组：官方 HTTP 合同把 SDK 的 images 编码为 prompt 对象，顶层数组会被 400。
