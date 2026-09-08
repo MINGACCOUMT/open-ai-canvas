@@ -77,7 +77,7 @@ export function CreativeProposalCard({ proposal, onApprove, onModify, onRedirect
         {!archived && <Button className="creative-agent-detail-toggle" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(!expanded)}>{expanded ? "收起完整方案" : "查看完整方案"}</Button>}
         {expanded && <div id={detailId} className="creative-agent-detail"><AIMessageMarkdown>{proposal.markdown}</AIMessageMarkdown></div>}
         {!archived && <><div className="creative-agent-scope-note">确认后创建本阶段节点并准备参数；图片、视频等生成费用另行确认。</div>
-        <div className="creative-agent-actions"><Button type="primary" loading={busy} disabled={disabled || busy} onClick={onApprove}>确认方案</Button><Button disabled={disabled || busy} onClick={onModify}>修改</Button><Dropdown menu={{ items: [{ key: "redirect", label: "换个方向" }], onClick: onRedirect }} trigger={["click"]} disabled={disabled || busy}><Button disabled={disabled || busy}>更多</Button></Dropdown></div></>}
+        <div className="creative-agent-actions creative-agent-primary-actions"><Button type="primary" loading={busy} disabled={disabled || busy} onClick={onApprove}>确认方案</Button><Button disabled={disabled || busy} onClick={onModify}>修改</Button><Dropdown menu={{ items: [{ key: "redirect", label: "换个方向" }], onClick: onRedirect }} trigger={["click"]} disabled={disabled || busy}><Button disabled={disabled || busy}>更多</Button></Dropdown></div></>}
         </>}
     </section>;
 }
@@ -96,7 +96,7 @@ export function CreativePlanBar({ plan, onLocateNode }: { plan?: CreativePlan | 
     return <Popover open={open} onOpenChange={(next) => { setOpen(next); if (!next) trigger.current?.focus(); }} afterOpenChange={(next) => { if (next) panel.current?.focus(); }} placement="top" trigger="click" content={<div id={panelId} ref={panel} tabIndex={-1} className="creative-agent-plan" data-canvas-no-zoom data-canvas-wheel-scroll onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); close(); } }}>
         <div className="creative-agent-card-row"><strong>制作计划</strong><Button size="small" onClick={close}>收起</Button></div>
         <ol>{plan.steps.map((step) => <li key={step.id} data-status={step.status}><div className="creative-agent-card-row"><strong>{step.title}</strong><Tag>{stepLabels[step.status]}</Tag></div>{step.detail && <p>{step.detail}</p>}{onLocateNode && step.nodeIds?.map((id, index) => <Button key={id} type="link" onClick={() => onLocateNode(id)}>定位节点 {index + 1}</Button>)}</li>)}</ol>
-    </div>}><Button ref={trigger} className="creative-agent-plan-trigger" aria-expanded={open} aria-controls={panelId} onKeyDown={(event) => { if (event.key === "Escape") close(); }}><span className="creative-agent-plan-count">{completed}/{plan.steps.length}</span><span className="creative-agent-plan-current">{running > 1 ? `运行中 ${running} 项` : current ? current.title : completed === plan.steps.length ? "计划已完成" : "查看制作计划"}</span><span className="creative-agent-plan-chevron" aria-hidden="true">{open ? "⌄" : "⌃"}</span></Button></Popover>;
+    </div>}><Button ref={trigger} className="creative-agent-plan-trigger" aria-label="查看制作计划" aria-expanded={open} aria-controls={panelId} onKeyDown={(event) => { if (event.key === "Escape") close(); }}><span className="creative-agent-plan-count">{completed}/{plan.steps.length}</span><span className="creative-agent-plan-current">{running > 1 ? `运行中 ${running} 项` : current ? current.title : completed === plan.steps.length ? "计划已完成" : "查看制作计划"}</span><span className="creative-agent-plan-chevron" aria-hidden="true">{open ? "⌄" : "⌃"}</span></Button></Popover>;
 }
 
 export function CreativeQuoteCard({ quote, onApprove, onRefresh, busy, disabled }: { quote: CreativeQuote; onApprove: () => void; onRefresh?: () => void; busy?: boolean; disabled?: boolean }) {
@@ -108,6 +108,6 @@ export function CreativeQuoteCard({ quote, onApprove, onRefresh, busy, disabled 
         {quote.expiresAt && <p>有效期至 {quote.expiresAt}</p>}{quote.approvedQuantity !== undefined && <p>已批准 {quote.approvedQuantity} 项</p>}
         {onRefresh && <Button className="creative-agent-detail-toggle" type="text" disabled={disabled || busy} onClick={onRefresh}>更新报价</Button>}</div></details>
         {quote.externalBilling && <p>由外部渠道计费，平台无法封顶第三方账单。</p>}
-        <div className="creative-agent-actions"><Button type="primary" loading={busy} disabled={disabled || busy} onClick={onApprove}>确认生成 · {quote.amountLabel}</Button></div>
+        <div className="creative-agent-actions creative-agent-primary-actions"><Button type="primary" loading={busy} disabled={disabled || busy} onClick={onApprove}>确认生成 · {quote.amountLabel}</Button></div>
     </section>;
 }
