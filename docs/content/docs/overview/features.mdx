@@ -5,6 +5,19 @@ description: 当前项目已实现的核心工作台能力与使用入口
 
 # 功能清单
 
+## 画布抓手与框选
+
+画布底部主工具栏用一个胶囊开关切换「区域选择」和「抓手工具」。默认是区域选择，空白处拖动框选节点；切到抓手后拖动平移画布。按住空格或中键仍可临时平移，不改变当前工具。
+
+框选多个节点后，悬浮栏默认提供对齐、等距、创建分镜组和批量连接。右键选区或画布空白处可「自适应整理画布」，按当前相对布局加大边距，而不是重排成宫格或媒体泳道。
+
+### 相关实现
+
+- `web/src/lib/canvas/tool-registry/definitions/main-toolbar-tools.tsx`：抓手与框选作为同一开关项注册。
+- `web/src/components/ui/aceternity/floating-dock.tsx`：dock 内胶囊开关与圆形滑块。
+- `web/src/lib/canvas/tool-registry/definitions/selection-toolbar-tools.tsx`：多选悬浮栏默认工具。
+- `web/src/lib/canvas/canvas-layout.ts`：`spreadCanvasNodes` 按相对占位加大边距。
+
 ## 系统渠道排序与前台别名
 
 后台系统渠道及渠道模型列表通过“设置排序”打开完整列表，支持拖动、上移和下移，点击“保存排序”统一生效；取消不会修改线上顺序。界面不显示内部排序数字，排序不受筛选及分页影响；并发修改会提示重新加载，避免覆盖其他管理员的调整。系统渠道模式下，用户端模型选择器沿用同一渠道及模型顺序。模型排序独立保存，不改变价格、能力版本或启用状态。

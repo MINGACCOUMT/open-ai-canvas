@@ -947,6 +947,7 @@ function InfiniteCanvasPage() {
         alignSelectedNodes,
         autoArrangeCanvasNodes,
         arrangeSelectedNodes,
+        spreadSelectedNodes,
         copyNodesToClipboard,
         copySelectedNodes,
         createFolder,
@@ -1769,7 +1770,10 @@ function InfiniteCanvasPage() {
         (event: ReactMouseEvent, id: string) => {
             event.preventDefault();
             event.stopPropagation();
-            setSelectedNodeIds(new Set([id]));
+            setSelectedNodeIds((current) => {
+                if (current.has(id) && current.size > 1) return current;
+                return new Set([id]);
+            });
             setSelectedConnectionId(null);
             closeConnectionCreateMenu();
             setToolbarNodeId(null);
@@ -2660,6 +2664,7 @@ function InfiniteCanvasPage() {
                         canUndo={historyState.canUndo}
                         canRedo={historyState.canRedo}
                         canPaste={hasCopiedNodes || Boolean(navigator.clipboard)}
+                        selectedCount={selectedNodeIds.size}
                         screenToCanvas={screenToCanvas}
                         onClose={() => setContextMenu(null)}
                         onAddNode={(type, position) => createNode(type, position)}
@@ -2693,6 +2698,9 @@ function InfiniteCanvasPage() {
                         onUploadToArkPrivateAsset={confirmUploadNodeImageToArkPrivateAsset}
                         onSetAssetCategory={(nodeId, assetCategory) => handleConfigNodeChange(nodeId, { assetCategory })}
                         onToggleFrame={(node) => handleFrameToggle(node.id)}
+                        onSpreadSelection={spreadSelectedNodes}
+                        onCopySelection={copySelectedNodes}
+                        onDeleteSelection={() => deleteNodes(selectedNodeIds)}
                     />
 
                     <CanvasUploadModal open={uploadModalOpen} onClose={closeUploadModal} onUpload={handleUploadFiles} />

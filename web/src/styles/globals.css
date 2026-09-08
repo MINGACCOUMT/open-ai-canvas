@@ -951,6 +951,7 @@
     --dock-tooltip-z: 140;
     --dock-precision-width: var(--space-12);
     --dock-z-popover: 30;                 /* dock 子面板在 toolbar 根 stacking context 内的层级（见 ADR-001）*/
+    --dock-switch-track: #000000;         /* 抓手/框选胶囊轨道：纯黑，和工具栏表面分开 */
 
     /* 页面顶部栏（PageHeader / 工作台头部）*/
     --page-topbar-h: 64px;
@@ -6738,6 +6739,43 @@
 
     .aceternity-dock-separator {
         background: color-mix(in srgb, currentColor 13%, transparent);
+    }
+
+    .aceternity-dock-switch-track {
+        border-radius: 999px;
+        background: var(--dock-switch-track, #000000);
+    }
+
+    .aceternity-dock-switch-thumb {
+        background: var(--dock-switch-thumb, #ffffff);
+    }
+
+    .aceternity-dock-switch-option {
+        color: #ffffff;
+        background: transparent;
+        opacity: 0.62;
+        transition:
+            color var(--motion-instant) ease-out,
+            opacity var(--motion-instant) ease-out;
+    }
+
+    .aceternity-dock-switch-option:hover:not([aria-checked="true"]) {
+        opacity: 0.88;
+    }
+
+    .aceternity-dock-switch-option[aria-checked="true"] {
+        color: var(--dock-switch-thumb-text, var(--background));
+        opacity: 1;
+    }
+
+    .aceternity-dock-switch-option > span svg {
+        width: 100%;
+        height: 100%;
+        stroke-width: 1.9;
+    }
+
+    .aceternity-dock-switch-option:focus-visible {
+        box-shadow: 0 0 0 2px var(--dock-command-bg), 0 0 0 4px var(--dock-switch-thumb, var(--workspace-accent));
     }
 
     .aceternity-dock-tooltip {

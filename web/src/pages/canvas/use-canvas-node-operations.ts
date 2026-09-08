@@ -5,7 +5,7 @@ import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { FOLDER_COLLAPSED_HEIGHT, FOLDER_COLLAPSED_WIDTH, FRAME_HEADER_HEIGHT, getFrameChildIds, getFrameChildren, isFrameNode } from "@/lib/canvas/canvas-frame";
-import { alignCanvasNodes, layoutCanvasAuto, layoutCanvasFlow, layoutCanvasNodes, nextCanvasVersionLabel, type CanvasAlignmentMode } from "@/lib/canvas/canvas-layout";
+import { alignCanvasNodes, layoutCanvasAuto, layoutCanvasFlow, layoutCanvasNodes, nextCanvasVersionLabel, spreadCanvasNodes, type CanvasAlignmentMode } from "@/lib/canvas/canvas-layout";
 import { applyCanvasConnectionPromptSync } from "@/lib/canvas/canvas-resource-references";
 import { createCanvasNode, isHiddenBatchChild, removeCanvasNodes } from "@/lib/canvas/canvas-project-domain";
 import { isolateCopiedNodeMetadata, nextCopiedNodeTitle } from "@/lib/canvas/canvas-node-copy";
@@ -205,6 +205,19 @@ export function useCanvasNodeOperations({
         commitNodes(currentNodes.map((node) => positions.has(node.id) ? { ...node, position: positions.get(node.id)! } : node));
         message.success(hasSelection ? "已按媒体分类整理选中节点" : "已按媒体分类整理画布");
     }, [commitNodes, connectionsRef, message, nodesRef, selectedNodeIdsRef]);
+
+    const spreadSelectedNodes = useCallback(() => {
+        const currentNodes = nodesRef.current;
+        const selected = currentNodes.filter((node) => selectedNodeIdsRef.current.has(node.id) && !node.metadata?.locked && !isFrameNode(node) && !isHiddenBatchChild(node, currentNodes));
+        if (selected.length < 2) {
+            message.info("请至少选择两个可整理节点");
+            return;
+        }
+        const positions = spreadCanvasNodes(selected);
+        if (!positions.size) return;
+        commitNodes(currentNodes.map((node) => positions.has(node.id) ? { ...node, position: positions.get(node.id)! } : node));
+        message.success("已按相对布局加大间距");
+    }, [commitNodes, message, nodesRef, selectedNodeIdsRef]);
 
     const alignSelectedNodes = useCallback((mode: CanvasAlignmentMode) => {
         const selected = nodesRef.current.filter((node) => selectedNodeIdsRef.current.has(node.id) && !node.metadata?.locked && !isFrameNode(node));
@@ -541,6 +554,7 @@ export function useCanvasNodeOperations({
         alignSelectedNodes,
         autoArrangeCanvasNodes,
         arrangeSelectedNodes,
+        spreadSelectedNodes,
         copyNodesToClipboard,
         copySelectedNodes,
         createFolder,

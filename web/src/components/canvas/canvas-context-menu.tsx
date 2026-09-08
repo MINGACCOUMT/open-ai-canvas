@@ -1,6 +1,6 @@
 import { AnimatePresence } from "motion/react";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
-import { ArrowLeft, Check, ChevronRight, Clipboard, CloudUpload, Copy, FolderOpen, FolderPlus, Image as ImageIcon, Layers3, Link2, Maximize2, PanelTop, Pencil, Plus, Redo2, Tags, Trash2, Undo2, Upload, UserRound } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, Clipboard, CloudUpload, Copy, FolderOpen, FolderPlus, Image as ImageIcon, Layers3, LayoutTemplate, Link2, Maximize2, PanelTop, Pencil, Plus, Redo2, Tags, Trash2, Undo2, Upload, UserRound } from "lucide-react";
 
 import { CanvasCreateMenu, type CanvasCreateCommand } from "@/components/canvas/canvas-create-menu";
 import { ASSET_CATEGORY_OPTIONS } from "@/lib/asset-category";
@@ -26,6 +26,7 @@ type CanvasNodeContextMenuProps = {
     canUndo: boolean;
     canRedo: boolean;
     canPaste: boolean;
+    selectedCount?: number;
     onClose: () => void;
     onAddNode: (type: CanvasNodeTypeId) => void;
     onAddFolder: () => void;
@@ -51,6 +52,9 @@ type CanvasNodeContextMenuProps = {
     onUploadToArkPrivateAsset: () => void;
     onSetAssetCategory: (category: CanvasAssetCategory) => void;
     onToggleFrame: () => void;
+    onSpreadSelection?: () => void;
+    onCopySelection?: () => void;
+    onDeleteSelection?: () => void;
 };
 
 export function CanvasNodeContextMenu({
@@ -61,6 +65,7 @@ export function CanvasNodeContextMenu({
     canUndo,
     canRedo,
     canPaste,
+    selectedCount = 0,
     onClose,
     onAddNode,
     onAddFolder,
@@ -86,6 +91,9 @@ export function CanvasNodeContextMenu({
     onUploadToArkPrivateAsset,
     onSetAssetCategory,
     onToggleFrame,
+    onSpreadSelection,
+    onCopySelection,
+    onDeleteSelection,
 }: CanvasNodeContextMenuProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [addOpen, setAddOpen] = useState(false);
@@ -135,7 +143,8 @@ export function CanvasNodeContextMenu({
     const canGenerateFromText = Boolean(isText && !isCharacterReference && hasNodeContent);
     const canCopyMediaUrl = Boolean(isMedia && hasNodeContent);
     const assetCategory = node ? canvasNodeAssetCategory(node) : "other";
-    const position = getContextMenuPosition(menu);
+    const hasMultiSelection = selectedCount >= 2;
+    const position = getContextMenuPosition(menu, hasMultiSelection);
 
     return (
         <>
@@ -169,6 +178,12 @@ export function CanvasNodeContextMenu({
                     ) : menu.type === "canvas" ? (
                         <>
                             <MenuHeader title="画布命令" />
+                            {hasMultiSelection ? (
+                                <>
+                                    <MenuButton icon={<LayoutTemplate className="size-4" />} label="自适应整理画布" detail="保持相对布局并加大边距" disabled={!onSpreadSelection} onClick={() => onSpreadSelection && runAction(onSpreadSelection)} />
+                                    <MenuDivider />
+                                </>
+                            ) : null}
                             <MenuButton icon={<Plus className="size-4" />} label="添加节点" chevron active={addOpen} onClick={() => setAddOpen((value) => !value)} />
                             <MenuButton icon={<Upload className="size-4" />} label="上传到这里" onClick={() => runAction(onUpload)} />
                             {!isProjectLinked ? <MenuButton icon={<FolderOpen className="size-4" />} label="从素材库插入" onClick={() => runAction(onOpenAssets)} /> : null}
@@ -177,6 +192,15 @@ export function CanvasNodeContextMenu({
                             <MenuButton icon={<Undo2 className="size-4" />} label="撤销" shortcut="⌘Z" disabled={!canUndo} onClick={() => runAction(onUndo)} />
                             <MenuButton icon={<Redo2 className="size-4" />} label="重做" shortcut="⇧⌘Z" disabled={!canRedo} onClick={() => runAction(onRedo)} />
                             <MenuButton icon={<Clipboard className="size-4" />} label="粘贴" shortcut="⌘V" disabled={!canPaste} onClick={() => runAction(onPaste)} />
+                        </>
+                    ) : menu.type === "node" && hasMultiSelection ? (
+                        <>
+                            <MenuHeader title={`已选 ${selectedCount} 个节点`} />
+                            <MenuSection label="选区" />
+                            <MenuButton icon={<LayoutTemplate />} label="自适应整理画布" detail="保持相对布局并加大边距" disabled={!onSpreadSelection} onClick={() => onSpreadSelection && runAction(onSpreadSelection)} />
+                            <MenuDivider />
+                            <MenuButton icon={<Copy />} label={`复制 ${selectedCount} 个节点`} shortcut="⌘C" disabled={!onCopySelection} onClick={() => onCopySelection && runAction(onCopySelection)} />
+                            <MenuButton icon={<Trash2 />} label={`删除 ${selectedCount} 个节点`} danger disabled={!onDeleteSelection} onClick={() => onDeleteSelection && runAction(onDeleteSelection)} />
                         </>
                     ) : menu.type === "node" ? (
                         <>
@@ -345,10 +369,10 @@ function MenuDivider() {
     return <div className="mx-1.5 my-1 h-px" style={{ background: `linear-gradient(90deg, transparent, ${theme.toolbar.border}, transparent)` }} />;
 }
 
-function getContextMenuPosition(menu: ContextMenuState) {
+function getContextMenuPosition(menu: ContextMenuState, hasMultiSelection = false) {
     if (typeof window === "undefined") return { left: menu.x, top: menu.y };
     const width = 224;
-    const estimatedHeight = menu.type === "node" ? Math.min(360, window.innerHeight - 72) : menu.type === "canvas" ? 250 : 84;
+    const estimatedHeight = menu.type === "node" ? Math.min(hasMultiSelection ? 240 : 360, window.innerHeight - 72) : menu.type === "canvas" ? (hasMultiSelection ? 300 : 250) : 84;
     return {
         left: clamp(menu.x, 12, Math.max(12, window.innerWidth - width - 12)),
         top: clamp(menu.y, 68, Math.max(68, window.innerHeight - estimatedHeight - 12)),
