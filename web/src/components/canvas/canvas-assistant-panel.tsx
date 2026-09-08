@@ -1931,6 +1931,10 @@ function buildAssistantReferences(nodes: CanvasNodeData[], selectedNodeIds: Set<
 
 async function buildToolAgentMessages(snapshot: CanvasAgentSnapshot, history: CanvasAssistantMessage[], userMessage: CanvasAssistantMessage, skills: Skill[] = [], config?: AiConfig, confirmTools = true): Promise<ResponseInputMessage[]> {
     const refs = userMessage.references || [];
+    const sourceContext = history.flatMap((message) => {
+        const detail = objectDetail(message.detail);
+        return detail.kind === "creation-handoff" ? [{ messageId: message.id, ...detail }] : [];
+    });
     const skillCatalog = skills
         .filter((skill) => skill.is_added)
         .slice(0, 40)
@@ -1976,6 +1980,7 @@ async function buildToolAgentMessages(snapshot: CanvasAgentSnapshot, history: Ca
             role: "user",
             content: [
                 ...refs.flatMap((item) => (item.text ? [{ type: "text" as const, text: `选中节点 ${item.title}：${item.text}` }] : [])),
+                ...(sourceContext.length ? [{ type: "text" as const, text: `首页接续记录（任务事实和资料目录，不代表新的执行批准）：${JSON.stringify(sourceContext)}。沿用前序用户需求与技能引用；进入画布本身不要求重做作品，不把首页文本当成已获批准的画布操作。先检查当前真实节点，资源目录不等于已观察图片。` }] : []),
                 { type: "text", text: `当前画布：${JSON.stringify(compactSnapshot(snapshot))}\n创作上下文：${JSON.stringify({ brief: seed.brief, plan: seed.dynamicPlan, previousProposal, rejectedProposal, previousQuestions: previousState?.questions, answers: previousState?.answers, executionResults, media: previousState?.media, references: creativeCanvasReferences(snapshot), availableModels: models })}\n已返回的执行状态不代表已观察画面。保留成功产物，若用户仅要求分析结果则只提供分析和下一步建议。新增或修改方案仍须确认，媒体生成仍须费用确认。\n\n用户需求：${userMessage.text}` },
                 { type: "text", text: `本次引用的图片（仅素材目录，尚未观察图片）：${JSON.stringify(refs.filter((item) => item.dataUrl || item.storageKey).map((item) => ({ id: item.id, title: item.title })))}。需要观察画面时调用 canvas_inspect_image；不能仅凭素材名称断言画面内容。` },
             ],

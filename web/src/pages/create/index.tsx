@@ -5,7 +5,7 @@ import { App, Button, Drawer, Dropdown, Modal, Popover, Spin } from "antd";
 import { Tooltip } from "@/components/ui/base/tooltip";
 import { Reorder } from "motion/react";
 import { ArrowDown, ArrowUp, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Clapperboard, Clock3, Copy, Download, FileText, Film, History, Image as ImageIcon, LoaderCircle, Maximize2, MessageSquareText, Minimize2, MoreHorizontal, Music2, Pencil, Plus, RefreshCw, Search, SlidersHorizontal, Sparkles, Trash2, UserRound, WandSparkles, Waves, X } from "lucide-react";
-import { Link } from "react-router";
+import { useNavigate } from "react-router";
 
 import { AIMessageMarkdown } from "@/components/ai/ai-message-markdown";
 import { GenerationToolCard, type GenerationToolStatus } from "@/components/ai/generation-tool-card";
@@ -18,7 +18,9 @@ import { CanvasResourceMentionTextarea } from "@/components/canvas/canvas-resour
 import { VoiceRecordingButton } from "@/components/conversation/voice-recording-button";
 import { ModelPicker } from "@/components/model-picker";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
-import { creationCanvasHandoffPath, creationResultAssetIds } from "@/lib/canvas/canvas-asset-handoff";
+import { creationResultAssetIds } from "@/lib/canvas/canvas-asset-handoff";
+import { continueCreationConversationOnCanvas } from "@/services/creation-canvas-conversation";
+import { getActiveUserScope } from "@/lib/user-scope";
 import { ASSET_CATEGORY_LABELS } from "@/lib/asset-category";
 import type { GenerationRetryContext } from "@/lib/canvas/canvas-project-generation";
 import { createClientId } from "@/lib/client-id";
@@ -98,7 +100,7 @@ type CreationMessage = {
     generationStage?: string;
     generationEffectKeys?: string[];
 };
-type CreationConversation = { id: string; title: string; updatedAt: string; messages: CreationMessage[] };
+type CreationConversation = { id: string; title: string; updatedAt: string; canvasId?: string; messages: CreationMessage[] };
 
 const modeLabels: Record<CreationMode, string> = { text: "文本", image: "图片", video: "视频" };
 const shotScriptLabels: Record<CreationMode, string> = { text: "创作思路", image: "画面指令", video: "镜头脚本" };
@@ -168,6 +170,9 @@ function completedCreationGenerationTask(runtime: CreationRuntime, input: { task
 
 export default function CreatePage() {
     const { message: toast, modal } = App.useApp();
+    const navigate = useNavigate();
+    const [openingCanvas, setOpeningCanvas] = useState(false);
+    const openingCanvasRef = useRef(false);
     const brandName = useAppearanceStore((state) => state.appearance.brandName);
     const config = useEffectiveConfig();
     const composerPreferencesHydrated = useCreationPreferencesStore((state) => state.hydrated);
@@ -839,6 +844,42 @@ export default function CreatePage() {
         setHistoryOpen(false);
     };
 
+    const continueOnCanvas = async (selectedAssetIds?: string[]) => {
+        if (!activeConversation || openingCanvasRef.current) return;
+        openingCanvasRef.current = true;
+        setOpeningCanvas(true);
+        const scope = getActiveUserScope();
+        const source = activeConversation;
+        try {
+            const assets = useAssetStore.getState().assets;
+            const generatedAssetIds = selectedAssetIds || source.messages.flatMap((item) => {
+                if (!item.resultUrls?.length) return [];
+                const ids = creationResultAssetIds(assets, { messageId: item.id, taskIds: item.taskIds || [], resultUrls: item.resultUrls });
+                if (ids.length !== item.resultUrls.length) throw new Error("部分生成素材还未保存完成，请稍后转入画布。");
+                return ids;
+            });
+            const referenceKeys = new Set(source.messages.flatMap((item) => (item.attachments || []).map((attachment) => attachment.storageKey).filter(Boolean)));
+            const referenceAssetIds = assets.filter((asset) => (asset.kind === "image" || asset.kind === "video") && asset.data.storageKey && referenceKeys.has(asset.data.storageKey)).map((asset) => asset.id);
+            const assetIds = [...generatedAssetIds, ...referenceAssetIds];
+            const result = await continueCreationConversationOnCanvas(source);
+            if (scope !== getActiveUserScope()) return;
+            const next = updateCreationConversationSnapshot(conversationsRef.current, source.id, (item) => ({ ...item, canvasId: result.id }));
+            conversationsRef.current = next;
+            setConversations(next);
+            await saveCreationConversations(next);
+            if (scope !== getActiveUserScope()) return;
+            if (result.syncError) toast.warning("会话已保存在本机，云端同步尚未完成。");
+            const params = new URLSearchParams({ conversation: result.sessionId });
+            if (assetIds.length) {
+                params.set("mode", "handoff");
+                [...new Set(assetIds)].forEach((id) => params.append("asset", id));
+            }
+            navigate(`/canvas/${result.id}?${params.toString()}`);
+        } catch (cause) {
+            if (scope === getActiveUserScope()) toast.error(cause instanceof Error ? cause.message : "转入画布失败，原会话已保留");
+        } finally { openingCanvasRef.current = false; setOpeningCanvas(false); }
+    };
+
     const selectConversation = (conversation: CreationConversation) => {
         followLatestMessageRef.current = true;
         setActiveId(conversation.id);
@@ -1030,13 +1071,15 @@ export default function CreatePage() {
                 />
             </main>
             </> : <div className="creation-thread-workbench">
-                <CreationWorkspaceToolbar onNewConversation={startNewConversation} onOpenHistory={() => setHistoryOpen(true)} shots={videoShots} onJumpToShot={jumpToShot} />
+                <CreationWorkspaceToolbar onNewConversation={startNewConversation} onOpenHistory={() => setHistoryOpen(true)} shots={videoShots} onJumpToShot={jumpToShot} onContinueCanvas={() => void continueOnCanvas()} openingCanvas={openingCanvas} />
                 <main ref={threadScrollRef} onScroll={handleThreadScroll} className="creation-thread-scroll creation-scrollbar">
                     <section className="creation-thread-stage"><div className="creation-results">{activeConversation.messages.map((item, index) => <div key={item.id} id={`creation-shot-${item.id}`} className="creation-thread-message"><CreationMessageView
                         item={item}
                         shotNumber={creationVideoShotOrdinal(videoShots, item)}
                         onRetryFailure={() => retryFailedMessage(item, index)}
                         onCreateVariant={() => createVariant(item, index)}
+                        onContinueCanvas={(ids) => void continueOnCanvas(ids)}
+                        openingCanvas={openingCanvas}
                         onEditUserMessage={(text) => { setPrompt(text); window.requestAnimationFrame(() => composerFocusRef.current?.focus()); }}
                     /></div>)}</div></section>
                 </main>
@@ -1179,7 +1222,7 @@ function CreationHistoryDrawer({ open, conversations, activeId, onNew, onClose, 
     </Drawer>;
 }
 
-function CreationWorkspaceToolbar({ shots, onJumpToShot, onNewConversation, onOpenHistory }: { shots: CreationShotRailEntry[]; onJumpToShot: (shot: CreationShotRailEntry) => void; onNewConversation: () => void; onOpenHistory: () => void }) {
+function CreationWorkspaceToolbar({ shots, onJumpToShot, onNewConversation, onOpenHistory, onContinueCanvas, openingCanvas }: { shots: CreationShotRailEntry[]; onJumpToShot: (shot: CreationShotRailEntry) => void; onNewConversation: () => void; onOpenHistory: () => void; onContinueCanvas: () => void; openingCanvas: boolean }) {
     const [railOpen, setRailOpen] = useState(false);
     const railRef = useRef<HTMLDivElement>(null);
     useEffect(() => {
@@ -1205,13 +1248,14 @@ function CreationWorkspaceToolbar({ shots, onJumpToShot, onNewConversation, onOp
             </div> : null}
         </div>
         <div className="creation-toolbar-actions">
+            <Button size="small" loading={openingCanvas} onClick={onContinueCanvas}>画布中继续</Button>
             <Tooltip title="新建创作"><button type="button" aria-label="新建创作" className="creation-toolbar-action" onClick={onNewConversation}><Plus /></button></Tooltip>
             <Tooltip title="历史对话"><button type="button" aria-label="查看历史对话" className="creation-toolbar-action" onClick={onOpenHistory}><History /></button></Tooltip>
         </div>
     </header>;
 }
 
-function CreationMessageView({ item, shotNumber, onRetryFailure, onCreateVariant, onEditUserMessage }: { item: CreationMessage; shotNumber: number; onRetryFailure: () => void; onCreateVariant: () => void; onEditUserMessage: (text: string) => void }) {
+function CreationMessageView({ item, shotNumber, onRetryFailure, onCreateVariant, onEditUserMessage, onContinueCanvas, openingCanvas }: { item: CreationMessage; shotNumber: number; onRetryFailure: () => void; onCreateVariant: () => void; onEditUserMessage: (text: string) => void; onContinueCanvas: (ids?: string[]) => void; openingCanvas: boolean }) {
     const brandName = useAppearanceStore((state) => state.appearance.brandName);
     if (item.role === "user") return <CreationUserMessage item={item} shotNumber={shotNumber} onEditUserMessage={onEditUserMessage} />;
     const mode = item.mode || "text";
@@ -1224,7 +1268,7 @@ function CreationMessageView({ item, shotNumber, onRetryFailure, onCreateVariant
         );
     const toolStatus: GenerationToolStatus = item.status === "pending" ? "running" : item.status === "error" ? "error" : item.status === "cancelled" ? "cancelled" : "completed";
     return <article className={`creation-assistant-message is-${mode}`}>
-        {mode === "text" ? <><div className="creation-message-heading">{heading}</div>{item.reasoning ? <div className="creation-message-reasoning-wrap"><MessageReasoning reasoning={item.reasoning} isStreaming={item.status === "streaming"} /></div> : null}<div className="creation-message-content">{item.content ? <AIMessageMarkdown isStreaming={item.status === "streaming"}>{item.content}</AIMessageMarkdown> : <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><WorkingDots dotSize={5} gap={2} /><span>正在生成…</span></span>}</div></> : <GenerationToolCard status={toolStatus} heading={heading}><MediaResult item={item} onRetryFailure={onRetryFailure} onCreateVariant={onCreateVariant} /></GenerationToolCard>}
+        {mode === "text" ? <><div className="creation-message-heading">{heading}</div>{item.reasoning ? <div className="creation-message-reasoning-wrap"><MessageReasoning reasoning={item.reasoning} isStreaming={item.status === "streaming"} /></div> : null}<div className="creation-message-content">{item.content ? <AIMessageMarkdown isStreaming={item.status === "streaming"}>{item.content}</AIMessageMarkdown> : <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><WorkingDots dotSize={5} gap={2} /><span>正在生成…</span></span>}</div></> : <GenerationToolCard status={toolStatus} heading={heading}><MediaResult item={item} onRetryFailure={onRetryFailure} onCreateVariant={onCreateVariant} onContinueCanvas={onContinueCanvas} openingCanvas={openingCanvas} /></GenerationToolCard>}
         {item.error && mode === "text" ? <div className="creation-message-error"><span>{generationErrorMessage(item.error)}</span><button type="button" onClick={onRetryFailure}><RefreshCw />重新生成</button></div> : null}
     </article>;
 }
@@ -1253,21 +1297,20 @@ function CreationUserMessage({ item, shotNumber, onEditUserMessage }: { item: Cr
     </article>;
 }
 
-function MediaResult({ item, onRetryFailure, onCreateVariant }: { item: CreationMessage; onRetryFailure: () => void; onCreateVariant: () => void }) {
+function MediaResult({ item, onRetryFailure, onCreateVariant, onContinueCanvas, openingCanvas }: { item: CreationMessage; onRetryFailure: () => void; onCreateVariant: () => void; onContinueCanvas: (ids?: string[]) => void; openingCanvas: boolean }) {
     const [previewUrl, setPreviewUrl] = useState("");
     const [previewType, setPreviewType] = useState<"image" | "video">("image");
     const assets = useAssetStore((state) => state.assets);
     const resultUrls = item.resultUrls || [];
     const resultAssetIds = resultUrls.length ? creationResultAssetIds(assets, { messageId: item.id, taskIds: item.taskIds || [], resultUrls }) : [];
-    const canvasHandoffPath = creationCanvasHandoffPath(resultAssetIds, resultUrls.length);
-    const canvasPath = canvasHandoffPath || "/canvas";
+    const canTransferAssets = resultAssetIds.length === resultUrls.length && resultAssetIds.length > 0;
     if (item.status === "pending") return <CreationMediaPending mode={item.mode || "image"} ratio={item.settings?.ratio} />;
     if ((item.status === "error" || item.status === "cancelled") && !resultUrls.length) return <div className="creation-media-error"><span>{item.status === "cancelled" ? item.content || "已停止" : generationErrorMessage(item.error || "生成失败")}</span><button type="button" onClick={onRetryFailure}><RefreshCw />重新生成</button></div>;
     if (!resultUrls.length) return <div className="creation-media-empty">没有返回可预览结果 <button type="button" onClick={onRetryFailure}>重试</button></div>;
     const isVideo = item.mode === "video";
     return <div className="creation-media-result">
         {isVideo ? <button type="button" className="creation-video-result" onClick={() => { setPreviewType("video"); setPreviewUrl(resultUrls[0]); }} aria-label="预览生成视频"><video muted preload="metadata" src={resultUrls[0]} /><span><Maximize2 />预览视频</span></button> : <div className="creation-image-result-grid">{resultUrls.map((url) => <button key={url} type="button" className="creation-image-result" onClick={() => { setPreviewType("image"); setPreviewUrl(url); }} aria-label="预览生成图片"><img src={url} alt="生成结果" /><span><Maximize2 /></span></button>)}</div>}
-        <div className="creation-media-actions"><span>{isVideo ? "视频结果" : `${resultUrls.length} 张图片`}</span><Link to={canvasPath}>{canvasHandoffPath ? "添加到画布" : "打开画布"}</Link>{resultUrls.map((url, index) => <a key={`${url}-download`} href={url} download>{resultUrls.length > 1 ? `下载 ${index + 1}` : <><Download />下载</>}</a>)}</div>
+        <div className="creation-media-actions"><span>{isVideo ? "视频结果" : `${resultUrls.length} 张图片`}</span><button type="button" disabled={openingCanvas || !canTransferAssets} title={!canTransferAssets ? "素材保存完成后可转入画布" : "携带当前会话与这些素材进入画布"} onClick={() => onContinueCanvas(resultAssetIds)}>{openingCanvas ? "正在打开…" : "画布中继续"}</button>{resultUrls.map((url, index) => <a key={`${url}-download`} href={url} download>{resultUrls.length > 1 ? `下载 ${index + 1}` : <><Download />下载</>}</a>)}</div>
         <CreationMediaPreviewModal url={previewUrl} type={previewType} onClose={() => setPreviewUrl("")} />
     </div>;
 }
