@@ -18,6 +18,45 @@ type sqlCaptureLogger struct {
 	statements []string
 }
 
+func TestAPICallLogRecordTypeFiltersListAndExport(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:api-log-record-types?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.ApiCallLog{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, item := range []model.ApiCallLog{
+		{ID: "request", Capability: "video", RequestKind: "create", CreatedAt: now},
+		{ID: "poll", Capability: "video", RequestKind: "poll", CreatedAt: now},
+		{ID: "video-download", Capability: "video", RequestKind: "download", CreatedAt: now},
+		{ID: "image-download", Capability: "image", RequestKind: "download", CreatedAt: now},
+	} {
+		if err := db.Create(&item).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	repo := New(db)
+	for _, tc := range []struct {
+		kind  string
+		count int
+	}{{"", 1}, {"request", 1}, {"download", 2}, {"all", 4}} {
+		filter := APICallLogFilter{AnalyticsFilter: AnalyticsFilter{From: now.Add(-time.Hour), To: now.Add(time.Hour)}, RecordType: tc.kind}
+		logs, total, err := repo.QueryAPICallLogs(filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(logs) != tc.count || total != int64(tc.count) {
+			t.Fatalf("kind=%s: count=%d total=%d", tc.kind, len(logs), total)
+		}
+		exported, err := repo.ExportAPICallLogs(filter, 100)
+		if err != nil || len(exported) != tc.count {
+			t.Fatalf("kind=%s: export count=%d err=%v", tc.kind, len(exported), err)
+		}
+	}
+}
+
 func (l *sqlCaptureLogger) LogMode(logger.LogLevel) logger.Interface { return l }
 func (*sqlCaptureLogger) Info(context.Context, string, ...any)       {}
 func (*sqlCaptureLogger) Warn(context.Context, string, ...any)       {}

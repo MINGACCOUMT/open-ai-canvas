@@ -683,7 +683,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 		page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-		logs, err := svc.AdminAPICallLogs(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), Keyword: c.Query("keyword"), Status: c.Query("status"), Page: page, Limit: limit})
+		logs, err := svc.AdminAPICallLogs(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), RecordType: c.Query("recordType"), Keyword: c.Query("keyword"), Status: c.Query("status"), Page: page, Limit: limit})
 		if err != nil {
 			failService(c, err)
 			return
@@ -776,7 +776,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup, svc *service.Service) {
 		if value := strings.TrimSpace(c.Query("ids")); value != "" {
 			selectedIDs = strings.Split(value, ",")
 		}
-		data, err := svc.AdminAPICallLogsCSV(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), Keyword: c.Query("keyword"), Status: c.Query("status"), IDs: selectedIDs})
+		data, err := svc.AdminAPICallLogsCSV(user, service.APICallLogQuery{AnalyticsQuery: analyticsQuery(c), RecordType: c.Query("recordType"), Keyword: c.Query("keyword"), Status: c.Query("status"), IDs: selectedIDs})
 		if err != nil {
 			failService(c, err)
 			return

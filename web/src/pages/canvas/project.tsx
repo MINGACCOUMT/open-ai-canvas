@@ -12,6 +12,7 @@ import { getActiveUserScope } from "@/lib/user-scope";
 import { resourceFileUrl, resourceIdFromStorageKey, syncResourceToArkPrivateAsset } from "@/services/api/resources";
 import { uploadImage } from "@/services/image-storage";
 import { imageMetadata } from "@/lib/canvas/canvas-generation-task-sync";
+import { isCanvasImageSourceNode } from "@/lib/canvas/canvas-image-source";
 import copyToClipboard from "copy-to-clipboard";
 import { nanoid } from "nanoid";
 import { canvasAppearanceBaseTheme, canvasAppearanceForTheme, DEFAULT_CANVAS_BACKGROUND_MODE, normalizeCanvasAppearance, resolveCanvasAppearance, writeCanvasAppearanceDefault, type CanvasAppearance } from "@/lib/canvas/canvas-appearance";
@@ -983,6 +984,7 @@ function InfiniteCanvasPage() {
         closeConnectionCreateMenu,
         connectionTargetAnchorRatio,
         connectionTargetNodeId,
+        connectionApproach,
         connectingParams,
         createConnectedNode,
         getConnectionCreateDisabledReason,
@@ -1460,6 +1462,7 @@ function InfiniteCanvasPage() {
         updateNodeFromContent(nodeId, (node) => ({ ...node, metadata: { ...node.metadata, ...patch } }));
     }, [updateNodeFromContent]);
     const canvasNodeActions = useMemo<CanvasNodeActionContextValue>(() => ({
+        upload: replaceCanvasNodeMedia,
         download: downloadNodeImage,
         duplicate: duplicateNodeFromContent,
         deleteNode: deleteNodeFromContent,
@@ -1468,7 +1471,7 @@ function InfiniteCanvasPage() {
         updateMediaNode: updateMediaNodeFromContent,
         openPortraitClearance,
         openArtCritique,
-    }), [deleteNodeFromContent, downloadNodeImage, duplicateNodeFromContent, openArtCritique, openPortraitClearance, updateMediaNodeFromContent, updateNodeFromContent, updateNodeMetadataFromContent]);
+    }), [deleteNodeFromContent, downloadNodeImage, duplicateNodeFromContent, openArtCritique, openPortraitClearance, replaceCanvasNodeMedia, updateMediaNodeFromContent, updateNodeFromContent, updateNodeMetadataFromContent]);
     const { agentSnapshot, agentUndoCount, applyAgentOps, canUndoAgentOps, dismissLastAgentChange, lastAgentChange, undoAgentOps, viewLastAgentChange } = useCanvasAgentOperations({
         projectId,
         domainProjectId: currentProject?.projectId,
@@ -2295,6 +2298,7 @@ function InfiniteCanvasPage() {
                                 <CanvasNodeActionContext.Provider value={canvasNodeActions}>
                                 <CanvasNodeGraphContext.Provider value={nodeGraphContext}>
                                 <CanvasProjectWorldLayers
+                                    connectionApproach={connectionApproach}
                                     projectId={projectId}
                                     viewportScale={viewport.k}
                                     connectionLayerBounds={connectionLayerBounds}
@@ -2497,7 +2501,7 @@ function InfiniteCanvasPage() {
                         />
                     ) : null}
 
-                    {dialogNode && dialogNode.type !== CanvasNodeType.Script && dialogNode.type !== CanvasNodeType.Drawing && !selectionBox && !isCanvasNodeMoving ? (
+                    {dialogNode && !isCanvasImageSourceNode(dialogNode) && !dialogNode.metadata?.fileUpload && dialogNode.type !== CanvasNodeType.Script && dialogNode.type !== CanvasNodeType.Drawing && !selectionBox && !isCanvasNodeMoving ? (
                         <CanvasNodePanelOverlay
                             node={dialogNode}
                             viewport={viewport}

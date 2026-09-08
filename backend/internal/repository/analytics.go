@@ -21,11 +21,12 @@ type AnalyticsFilter struct {
 
 type APICallLogFilter struct {
 	AnalyticsFilter
-	Keyword string
-	Status  string
-	IDs     []string
-	Page    int
-	Limit   int
+	RecordType string
+	Keyword    string
+	Status     string
+	IDs        []string
+	Page       int
+	Limit      int
 }
 
 func (r *Repository) RecordUserActivity(userID string, event string, count int, now time.Time) error {
@@ -137,7 +138,14 @@ func (r *Repository) ExportAPICallLogs(filter APICallLogFilter, limit int) ([]mo
 }
 
 func (r *Repository) filteredAPICallLogQuery(filter APICallLogFilter) *gorm.DB {
-	query := visibleAPICallLogQuery(r.apiCallLogQuery(filter.AnalyticsFilter))
+	query := r.apiCallLogQuery(filter.AnalyticsFilter)
+	switch filter.RecordType {
+	case "download":
+		query = query.Where("api_call_logs.request_kind = ?", "download")
+	case "all":
+	default:
+		query = visibleAPICallLogQuery(query).Where("COALESCE(api_call_logs.request_kind, '') <> ?", "download")
+	}
 	if value := strings.TrimSpace(filter.Keyword); value != "" {
 		pattern := "%" + strings.ToLower(value) + "%"
 		query = query.

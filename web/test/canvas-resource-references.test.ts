@@ -190,7 +190,8 @@ describe("canvas resource mention slots", () => {
 
         expect(references.get(target.id)?.map((reference) => reference.nodeId)).toEqual([audio.id]);
         expect(references.get(config.id)?.map((reference) => reference.nodeId)).toEqual([target.id, audio.id]);
-        expect(references.get(image.id)?.map((reference) => reference.nodeId)).toEqual([image.id]);
+        expect(references.get(image.id)?.map((reference) => reference.nodeId)).toEqual([]);
+        expect(buildNodeMentionReferences(image, nodes, connections)).toEqual([]);
     });
 
     test("素材库身份 token 保持稳定", () => {
@@ -259,4 +260,3 @@ describe("remove canvas resource mention tokens", () => {
         expect(nextTarget.metadata?.composerContent).toBe("比较 和 @图片1");
     });
 });
-
