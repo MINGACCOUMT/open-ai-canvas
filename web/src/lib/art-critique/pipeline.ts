@@ -1116,7 +1116,7 @@ function emitStage(options: ArtCritiquePipelineOptions, stage: ArtCritiquePipeli
 }
 
 function rethrowIfAborted(error: unknown, signal?: AbortSignal): asserts error is Error {
-    if (signal?.aborted) throw error;
+    if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw error;
 }
 
 function throwIfAborted(signal?: AbortSignal) {

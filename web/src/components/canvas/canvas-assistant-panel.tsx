@@ -136,6 +136,7 @@ function generationToolDefinition(name: string, description: string, mode?: "tex
 }
 
 const ONLINE_AGENT_TOOLS: ResponseFunctionTool[] = [
+    toolDefinition("canvas_start_art_critique", "打开真实审美节点并准备分析报价，费用卡确认后才提交模型；不会由本工具批准费用。已有当前图片报告直接复用，只有用户明确要求重新分析才传 retry=true。", { nodeId: { type: "string" }, retry: { type: "boolean" } }, ["nodeId"]),
     toolDefinition("canvas_read_plugin_node", "读取已启用插件提供的真实节点状态与已有分析结果，不启动新任务。", { nodeId: { type: "string" } }, ["nodeId"]),
     toolDefinition("canvas_list_styles", "读取真实项目画风目录；source=system 为系统预设，source=user 为当前用户保存的风格。返回 ID 和说明，不能编造 ID。", { source: { type: "string", enum: ["system", "user"] }, query: { type: "string" } }),
     toolDefinition("canvas_apply_style", "应用从画风目录发现的真实风格，复用页面画风保存逻辑；关联项目时同步项目设置。已有画风且无需改变时直接沿用。", { source: { type: "string", enum: ["system", "user"] }, id: { type: "string" } }, ["source", "id"]),
@@ -271,7 +272,7 @@ type OnlineAgentTab = "chat" | "history";
 type OnlineAgentLog = { id: string; time: string; title: string; data?: unknown };
 type OnlineAgentLogContext = { model: string; running: boolean; confirmTools: boolean; messages: number; nodes: number; connections: number };
 type OnlineLoopContext = { step: number };
-type OnlineToolResult = { ok: true; message: string; data?: unknown } | { ok: false; message: string };
+type OnlineToolResult = { ok: true; message: string; data?: unknown; waitForUser?: boolean } | { ok: false; message: string };
 type OnlineExecutedToolCall = { toolCallId: string; name: string; result: OnlineToolResult };
 type PendingOnlineToolContext = { messages: ResponseInputMessage[]; toolCalls: ResponseToolCall[]; assistantId: string; step: number };
 
@@ -286,6 +287,7 @@ type CanvasAssistantPanelProps = {
     onSessionsChange: (sessions: CanvasAssistantSession[], activeSessionId: string | null) => void;
     onApplyOps: (ops?: CanvasAgentOp[], context?: { conversationId?: string; messageId?: string; source?: "online" | "local" }) => Promise<CanvasAgentSnapshot>;
     onApplyStyle: (preset: CanvasStylePreset) => Promise<void>;
+    onStartArtCritique: (nodeId: string, restart: boolean) => void;
     canUndoOps: boolean;
     undoOpsCount: number;
     onUndoOps: () => CanvasAgentSnapshot | null;
@@ -378,6 +380,7 @@ export function CanvasAssistantPanel({
     onSessionsChange,
     onApplyOps,
     onApplyStyle,
+    onStartArtCritique,
     canUndoOps,
     undoOpsCount,
     onUndoOps,
@@ -790,6 +793,11 @@ export function CanvasAssistantPanel({
             inspectedImagesRef.current.delete(item.toolCallId);
             return image ? [image] : [];
         });
+        const waiting = toolResults.find((item) => item.result.ok && item.result.waitForUser);
+        if (waiting) {
+            upsertMessage(sessionId, { id: assistantId, role: "assistant", text: waiting.result.message });
+            return;
+        }
         // 工具结果只持久化读取事实，图片仅进入下一次模型请求；旧像素不随每轮重复发送。
         const prior = images.length ? messages.map((message): ResponseInputMessage => {
             if ("type" in message || message.role === "tool" || !Array.isArray(message.content)) return message;
@@ -858,6 +866,17 @@ export function CanvasAssistantPanel({
             const currentSkills = skillRuntime.agentToolNames("onlineAgent").has(name) ? (await listAddedSkills()).skills : composerSkills;
             const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, currentSkills);
             if (skillToolResult) return skillToolResult;
+            if (name === "canvas_start_art_critique") {
+                const nodeId = requireString(args.nodeId, "nodeId");
+                const node = current.nodes.find((item) => item.id === nodeId && item.type === "ai-art-critique");
+                if (!node || !isPluginEffectivelyEnabled("ai-art-critique")) throw new Error("审美插件未启用或节点不存在");
+                const sources = current.nodes.filter((item) => item.type === "image" && current.connections.some((edge) => edge.fromNodeId === item.id && edge.toNodeId === nodeId));
+                if (sources.length !== 1) throw new Error("审美分析需要明确连接一张图片，请先整理输入连线");
+                const result = readAgentPluginNode(current, nodeId);
+                if (args.retry !== true && result.data.status === "completed") return { ok: true, message: "已复用当前图片的审美报告。", data: result };
+                onStartArtCritique(nodeId, args.retry === true);
+                return { ok: true, waitForUser: true, message: "已打开审美分析，请在面板中核对并确认费用。分析完成后，可让我读取报告并继续处理。", data: { nodeId, status: "analysis_requested", paymentApproved: false } };
+            }
             if (name === "canvas_read_plugin_node") return { ok: true, message: "已读取插件节点状态。", data: readAgentPluginNode(current, requireString(args.nodeId, "nodeId")) };
             if (name === "canvas_read_storyboard") {
                 const { node, rows } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
@@ -964,15 +983,16 @@ export function CanvasAssistantPanel({
 
     const executeOnlineToolCalls = async (sessionId: string, toolCalls: ResponseToolCall[]) => {
         const results: OnlineExecutedToolCall[] = [];
-        let stopped = false;
+        let stopReason = "";
         for (const toolCall of toolCalls) {
-            if (stopped) {
-                results.push({ toolCallId: toolCall.id, name: toolCall.function.name, result: { ok: false, message: "前一个工具调用失败，未继续执行。" } });
+            if (stopReason) {
+                results.push({ toolCallId: toolCall.id, name: toolCall.function.name, result: { ok: false, message: stopReason } });
                 continue;
             }
             const result = await executeOnlineToolCall(sessionId, toolCall);
             results.push(result);
-            if (!result.result.ok) stopped = true;
+            if (!result.result.ok) stopReason = "前一个工具调用失败，未继续执行。";
+            else if (result.result.waitForUser) stopReason = "已打开待确认面板，同批后续操作暂不执行。";
         }
         return results;
     };
@@ -1761,6 +1781,7 @@ function previewOnlineToolCalls(calls: ResponseToolCall[], snapshot: CanvasAgent
 }
 
 function toolCallLabel(name: string) {
+    if (name === "canvas_start_art_critique") return "准备审美分析";
     if (name === "canvas_read_plugin_node") return "读取插件结果";
     if (name === "canvas_list_styles") return "查找项目画风";
     if (name === "canvas_apply_style") return "应用项目画风";

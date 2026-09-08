@@ -19,6 +19,7 @@ export async function executeArtCritique(input: {
     onTaskCreated: (stage: string, taskId: string) => void;
     onStage?: ArtCritiquePipelineOptions["onStage"];
     onDraftReport?: ArtCritiquePipelineOptions["onDraftReport"];
+    submitStage?: typeof runBackendToolGenerationTask;
 }, dependencies = { inspectImage: inspectAgentImage, runTask: runBackendToolGenerationTask, runPipeline: runArtCritiquePipeline }) {
     if (!input.nodeId || !input.runId || !isArtCritiqueImageInput(input.source)) throw new Error("分析需要真实目标节点、执行标识和已有图片");
     const scope = getActiveUserScope();
@@ -38,7 +39,7 @@ export async function executeArtCritique(input: {
             assertLive();
             if (calledStages.has(toolName) || calledStages.size >= ART_CRITIQUE_MAX_MODEL_CALLS) throw new Error("分析阶段重复或超过本次调用数量上限");
             calledStages.add(toolName);
-            const result = await dependencies.runTask({
+            const result = await (input.submitStage || dependencies.runTask)({
                 config, messages, tools: [tool], toolChoice: { type: "function", name: toolName },
                 prompt: `图片审美分析：${toolName}`, signal,
                 metadata: { source: "art-critique", nodeId: input.nodeId, runId: input.runId, stage: toolName },

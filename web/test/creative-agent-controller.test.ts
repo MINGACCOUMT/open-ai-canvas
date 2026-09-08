@@ -8,7 +8,7 @@ import type { GenerationTask } from "../src/services/api/task-center";
 import { CanvasNodeType } from "../src/types/canvas";
 
 function harness(state: CreativeAgentState, status: CreationRun["status"] = "paused", submissions: CreationSubmission[] = [], waitTask?: ConstructorParameters<typeof CreativeAgentController>[0]["waitTask"]) {
-    let run: CreationRun = { id: "run", userId: "user", canvasId: "canvas", revision: 1, executionEpoch: 0, executionOwner: "", status, state: structuredClone(state) as unknown as Record<string, unknown>, approvedProposalVersion: state.proposal?.version, createdAt: "", updatedAt: "" };
+    let run: CreationRun = { id: "run", userId: "user", canvasId: "canvas", revision: 1, executionEpoch: 0, executionOwner: "", status, state: structuredClone(state) as unknown as Record<string, unknown>, approvedProposalVersion: state.proposal?.version, approvedProposalHash: state.operations ? "approved-proposal-hash" : undefined, createdAt: "", updatedAt: "" };
     let snapshot: CanvasAgentSnapshot = { projectId: "canvas", title: "canvas", nodes: state.media.map((media) => ({ id: media.nodeId, type: CanvasNodeType.Image, title: media.ref, position: { x: 0, y: 0 }, width: 100, height: 100, metadata: {} })), connections: [], selectedNodeIds: [], viewport: { x: 0, y: 0, k: 1 } };
     let view: CreativeControllerView | undefined;
     let commits = 0, prepares = 0, executions = 0;
@@ -67,6 +67,11 @@ describe("创作控制器恢复", () => {
     test("prepare回执丢失后按itemKey恢复原报价，不新增调用", async () => {
         const h = harness({ ...initialCreativeState(), planning: { itemKey: "planning:key", protocol: [], model: "model" } }, "running", [submission("existing", "planning:key")]);
         try { await h.controller.load("run"); await h.controller.resume(); expect(h.view().state.planning?.submissionId).toBe("existing"); expect(h.view().quote).toBeDefined(); expect(h.counters().prepares).toBe(0); } finally { h.controller.dispose(); }
+    });
+    test("未批准的方案恢复时仍等待用户确认，不创建画布节点", async () => {
+        const h = harness({ ...initialCreativeState(), proposal, canvasApplied: false });
+        try { await h.controller.load("run"); await h.controller.resume(); expect(h.view().run?.status).toBe("waiting_proposal"); expect(h.snapshot().nodes).toHaveLength(0); expect(h.counters()).toEqual({ commits: 0, prepares: 0, executions: 0 }); }
+        finally { h.controller.dispose(); }
     });
     test("第一项失败不阻止同批成功结果回写", async () => {
         const media = ["a", "b"].map((ref) => ({ ref, nodeId: ref, attempt: 1, submissionId: ref, taskId: ref, status: "queued" as const }));

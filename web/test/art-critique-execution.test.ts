@@ -3,7 +3,7 @@ import { executeArtCritique } from "../src/services/art-critique-execution";
 import { defaultConfig } from "../src/stores/use-config-store";
 import { createCanvasNode } from "../src/lib/canvas/canvas-project-domain";
 import { CanvasNodeType } from "../src/types/canvas";
-import type { ArtCritiquePipelineOptions } from "../src/lib/art-critique/pipeline";
+import { runArtCritiquePipeline, type ArtCritiquePipelineOptions } from "../src/lib/art-critique/pipeline";
 
 const source = createCanvasNode(CanvasNodeType.Image, { x: 0, y: 0 }, { storageKey: "resource:original" });
 const options = () => ({ nodeId: "analysis", runId: "run", source, config: defaultConfig, signal: new AbortController().signal, onTaskCreated: (_stage: string, _id: string) => {} });
@@ -43,4 +43,13 @@ test("准备素材期间取消不会提交后台模型任务", async () => {
         runPipeline: async () => { throw new Error("不应开始分析"); },
     })).rejects.toThrow();
     expect(submitted).toBe(false);
+});
+
+test("审批执行器中止不能被管线降级为已完成报告", async () => {
+    await expect(runArtCritiquePipeline({ ...defaultConfig, textModel: "model" }, { dataUrl: "resource:image", title: "image", sourceFingerprint: "image" }, {
+        requestStage: async ({ toolName }) => {
+            if (toolName === "analyze_art_scene") throw new DOMException("报价服务不可用", "AbortError");
+            return { content: "", toolCalls: [{ id: toolName, type: "function", function: { name: toolName, arguments: JSON.stringify({ candidates: [] }) } }] };
+        },
+    })).rejects.toThrow("报价服务不可用");
 });
