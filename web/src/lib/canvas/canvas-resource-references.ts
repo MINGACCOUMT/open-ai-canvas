@@ -39,7 +39,7 @@ export function canvasNodeMentionToken(nodeId: string) {
 
 export function canvasResourceMentionToken(reference: CanvasResourceReference) {
     if (reference.mentionToken) return reference.mentionToken;
-    if (reference.kind === "skill" && reference.skill?.skill_id) return canvasSkillMentionToken(reference.skill.skill_id);
+    if (reference.kind === "skill" && reference.skill?.skillId) return canvasSkillMentionToken(reference.skill.skillId);
     if (reference.assetId) return `@[asset:${reference.assetId}]`;
     return `@${reference.label}`;
 }
@@ -239,7 +239,10 @@ export function getMentionResourceNodes(nodeId: string, nodes: CanvasNodeData[],
     if (configInputs.length) return configInputs;
     const ownInputs = getContextResourceNodes(nodeId, nodes, connections);
     if (ownInputs.length) return ownInputs;
-    return [];
+    // 没有入边时，资源节点可以把自身当作 @图片1 / @视频1，用于图生图、视频再编辑。
+    // 有入边时仍只暴露上游，避免自身把槽位序号挤掉。
+    const self = nodes.find((node) => node.id === nodeId);
+    return self && isResourceNode(self) ? [self] : [];
 }
 
 export function getGenerationResourceNodes(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]) {

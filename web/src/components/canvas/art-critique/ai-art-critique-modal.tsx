@@ -1,4 +1,5 @@
-import { Button, Modal, Tag } from "antd";
+import { Button, Tag } from "antd";
+import { AppModal } from "@/components/ui/product/app-modal";
 import { EmptyState } from "@/components/ui/product/empty-state";
 import { ArrowLeft, ArrowRight, CheckCircle2, ChevronDown, ChevronRight, Copy, FileText, Image as ImageIcon, LoaderCircle, RefreshCw, Sparkles, Target, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -256,7 +257,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
     const modelInlineLabel = selectedCritiqueModel || visibleState.report?.modelLabel ? `${modelStatusLabel} · ${displayedModelLabel}` : "请到设置中选择支持图片理解的文本模型";
 
     return (
-        <Modal
+        <AppModal
             open={open}
             title={null}
             closable={false}
@@ -266,7 +267,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
             onCancel={close}
             footer={null}
             className="art-critique-modal"
-            styles={{ container: { padding: 0, overflow: "hidden" }, body: { padding: 0 } }}
+            flush
         >
             <div className="flex h-[min(820px,calc(100dvh-32px))] max-h-[calc(100dvh-32px)] min-h-0 flex-col overflow-hidden rounded-[var(--r-lg)]" style={{ background: theme.canvas.background, color: theme.node.text }}>
                 <header className="flex shrink-0 items-center gap-3 border-b px-5 py-3.5" style={{ borderColor: theme.node.edge }}>
@@ -465,7 +466,7 @@ export function AiArtCritiqueModal({ node, upstreamNodes, open, onClose, onUpdat
                     </aside>
                 </div>
             </div>
-        </Modal>
+        </AppModal>
     );
 }
 

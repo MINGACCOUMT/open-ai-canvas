@@ -7,6 +7,7 @@ import { buildGenerationConfig, isGenerationCanceled } from "@/lib/canvas/canvas
 import { canvasGenerationPromptMetadata, canvasGenerationRequestFingerprint, runCanvasGenerationSubmissionOnce } from "@/lib/canvas/canvas-generation-submission";
 import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-batch";
 import { buildPortraitTexturePrompt } from "@/lib/canvas/canvas-portrait-texture";
+import { buildTextRewritePrompt } from "@/lib/prompts";
 import { resolveCanvasStyleExecution } from "@/lib/canvas/canvas-style-execution";
 import { generationErrorMessage, generationFailureMetadata } from "@/lib/generation-error";
 import { modelCompatibilityError, modelGroupReferenceLimits, modelPromptLengthError, modelRequestOptions, type ModelRequirements } from "@/lib/model-selection";
@@ -143,7 +144,7 @@ export function useCanvasGenerationExecutor({
                             nodeId,
                             nodesRef.current,
                             connectionsRef.current,
-                            editingTextNode ? `请根据要求修改以下文本。\n\n原文：\n${sourceTextContent}\n\n修改要求：\n${prompt}` : generationPrompt,
+                            editingTextNode ? buildTextRewritePrompt(sourceTextContent, prompt) : generationPrompt,
                             assets,
                             promptOnly,
                         );

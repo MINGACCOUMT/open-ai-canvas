@@ -340,7 +340,7 @@ export function AgentChatComposer({
     };
 
     const applySlashSkill = (skill: Skill) => {
-        const token = `@[skill:${skill.skill_id}] `;
+        const token = `@[skill:${skill.skillId}] `;
         const next = slash ? `${prompt.slice(0, slash.start)}${token}${prompt.slice(slash.start + slash.query.length)}` : prompt ? `${prompt.replace(/\s+$/u, "")} ${token}` : token;
         setSlash(null);
         setSlashIndex(0);
@@ -463,7 +463,7 @@ export function AgentChatComposer({
                         >
                             {availableSlashSkills.map((skill, index) => (
                                 <button
-                                    key={skill.skill_id}
+                                    key={skill.skillId}
                                     type="button"
                                     className="flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs"
                                     style={{ background: index === activeSlashIndex ? theme.toolbar.itemHover : "transparent", color: theme.node.text }}
@@ -471,7 +471,7 @@ export function AgentChatComposer({
                                     onClick={() => applySlashSkill(skill)}
                                 >
                                     <Sparkles className="size-3.5 shrink-0 opacity-70" />
-                                    <span className="min-w-0 truncate font-medium">{skill.skill_name}</span>
+                                    <span className="min-w-0 truncate font-medium">{skill.skillName}</span>
                                     {skill.description ? <span className="min-w-0 flex-1 truncate opacity-50">{skill.description}</span> : null}
                                 </button>
                             ))}

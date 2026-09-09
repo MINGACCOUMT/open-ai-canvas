@@ -71,6 +71,20 @@ SEO 标题、描述、可选关键词会投影到浏览器 metadata、Open Graph
 - `backend/internal/service/password_reset.go`：发送策略、验证码校验和密码重置业务边界。
 - `backend/internal/repository/repository.go`：密码更新、验证码消费和登录会话撤销事务。
 
+## 官方提示词模板
+
+平台级 LLM 任务只走后端提示词目录，不在页面里手写整段系统指令。运营可在管理后台维护版本，用户可在设置里跟随、追加或改写创作层；动态上下文和 JSON 输出契约由服务端编译时注入，不能被模板或个人偏好覆盖。
+
+当前操作包括：章节资产提取、分镜规划/修复、分镜首帧、分镜视频、角色卡提取、角色三视图、短剧大纲、技能草稿。短剧一句话生成和技能库 AI 草稿只提交 `promptTemplateOperation` 与变量，占位 prompt 不会成为模型看到的正文。
+
+画布内置预设、反推提示词、工作流起步稿、文本改写包装、视频操作包装、字幕高亮指令和在线 Agent 协议提示词属于客户端目录 `web/src/lib/prompts` 与 `web/src/lib/canvas/canvas-agent-protocol.ts`。Agent 系统提示词是产品契约，不开放运营改写，避免把工具权限改坏。
+
+### 相关实现
+
+- `backend/internal/service/prompt_template.go`、`prompt_template_defaults.go`：操作定义、编译、受保护契约和结果校验。
+- `web/src/lib/prompts/`：前端操作名、客户端起始/包装提示词和短剧大纲解析。
+- `web/src/pages/settings/prompt-preferences-pane.tsx`、`web/src/pages/admin/storyboard-prompts/storyboard-prompts-page.tsx`：用户偏好与运营版本。
+
 ## AI 提示词优化器
 
 提示词优化器是一个内置 AI 能力插件，用于把模糊的生图或生视频想法整理成可以直接使用的提示词。它复用宿主已经配置的文本模型和渠道，不在浏览器中保存或拼接第三方密钥。

@@ -117,6 +117,20 @@ describe("canvas resource mention slots", () => {
         expect(asset && "coverUrl" in asset ? asset.coverUrl : "").toBe("https://cdn.example.com/poster.jpg");
     });
 
+    test("仅有持久资源键的媒体节点仍可恢复为素材且不伪造临时地址", () => {
+        const node = videoNode("storage-key-only-video");
+        node.metadata = {
+            storageKey: "  video:user:durable  ",
+            mimeType: "video/mp4",
+        };
+
+        const asset = canvasNodeToAsset(node, { canvasId: "canvas", source: "canvas-upload" });
+
+        expect(asset?.kind).toBe("video");
+        expect(asset?.kind === "video" ? asset.data.url : "not-video").toBe("");
+        expect(asset?.kind === "video" ? asset.data.storageKey : undefined).toBe("video:user:durable");
+    });
+
     test("上传视频作为生成设置引用时携带首帧预览，而不是播放器地址", () => {
         const source = videoNode("uploaded-video");
         source.metadata = {
@@ -191,7 +205,7 @@ describe("canvas resource mention slots", () => {
         expect(references.get(target.id)?.map((reference) => reference.nodeId)).toEqual([audio.id]);
         expect(references.get(config.id)?.map((reference) => reference.nodeId)).toEqual([target.id, audio.id]);
         expect(references.get(image.id)?.map((reference) => reference.nodeId)).toEqual([]);
-        expect(buildNodeMentionReferences(image, nodes, connections)).toEqual([]);
+        expect(buildNodeMentionReferences(image, nodes, connections).map((reference) => reference.nodeId)).toEqual([image.id]);
     });
 
     test("素材库身份 token 保持稳定", () => {

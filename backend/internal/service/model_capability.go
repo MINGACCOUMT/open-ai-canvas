@@ -277,6 +277,30 @@ func DecodeModelCapabilityConfig(raw string) (*ModelCapabilityConfig, error) {
 	return &value, nil
 }
 
+// normalizedChannelModelCapability 从持久化记录恢复渠道模型的权威能力合同。
+// 目录读取可以选择隔离损坏记录；任务创建等写路径必须把错误向上返回并失败关闭。
+func normalizedChannelModelCapability(channelModel *model.ChannelModel) (*ModelCapabilityConfig, error) {
+	if channelModel == nil {
+		return nil, errors.New("渠道模型为空")
+	}
+	capability := normalizeCapability(channelModel.Capability)
+	if capability == "audio" {
+		return nil, nil
+	}
+	if capability != "text" && capability != "image" && capability != "video" {
+		return nil, fmt.Errorf("不支持的渠道模型能力：%s", channelModel.Capability)
+	}
+	config, err := DecodeModelCapabilityConfig(channelModel.CapabilityConfigJSON)
+	if err != nil {
+		return nil, fmt.Errorf("解析渠道模型能力配置失败：%w", err)
+	}
+	normalized, err := NormalizeModelCapabilityConfigForModel(capability, string(channelModel.Protocol), firstNonEmpty(channelModel.ProviderModelKey, channelModel.ModelKey), config)
+	if err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
 func NormalizeModelCapabilityConfig(capability string, protocol string, input *ModelCapabilityConfig) (*ModelCapabilityConfig, error) {
 	return NormalizeModelCapabilityConfigForModel(capability, protocol, "", input)
 }

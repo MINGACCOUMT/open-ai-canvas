@@ -1,6 +1,7 @@
 import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
+import { workflowStarterPrompt } from "@/lib/prompts";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "./canvas-agent-ops";
@@ -143,9 +144,9 @@ export function buildCanvasWorkflowOps(input: CanvasWorkflowInput, snapshot: Can
 
 function workflowPrompt(kind: CanvasWorkflowNodeKind, title: string, input: CanvasWorkflowInput) {
     const workflowTitle = (input.title || input.description || "当前创作项目").trim();
-    if (kind === "character_cards") return `请基于「${workflowTitle}」拆分主要角色，并为每个角色生成可用于后续创作的角色图片卡片：外观、服饰、身份、性格和视觉辨识点。`;
-    if (kind === "character_three_view") return `请基于上游角色卡片生成「${title}」：同一角色的正面、侧面、背面三视图，保持服饰、发型、道具和比例一致。`;
-    if (kind === "storyboard_video") return `请基于上游角色三视图，为「${workflowTitle}」制作分镜剧情视频方案：包含镜头顺序、景别、动作、节奏和画面连续性。`;
+    if (kind === "character_cards" || kind === "character_three_view" || kind === "storyboard_video") {
+        return workflowStarterPrompt(kind, title, workflowTitle);
+    }
     return "";
 }
 

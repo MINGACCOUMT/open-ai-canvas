@@ -52,6 +52,15 @@ description: 影策后端核心持久化表与状态边界
 
 规范化技能包保存在后端数据目录的 `skill-packages/<skill-id>/<version-id>.zip`，数据库只保存索引和版本指针。上传 ZIP 时强制校验 `SKILL.md`、路径越界、软链接、重复路径、文件数量和解压大小；GitHub 技能保存公开仓库、分支、子目录和提交 SHA，后台每 6 小时检查一次开启自动更新的技能，并记录最近检查、同步时间及失败状态。
 
+## 提示词模板
+
+| 表 | 用途 | 关键边界 |
+| --- | --- | --- |
+| `prompt_templates` | 保存每个操作的平台提示词版本 | `(operation, version)` 唯一；同一操作同一时间只能有一个启用版本；启用中的版本不能直接改文案或停用 |
+| `user_prompt_customizations` | 保存用户对某个操作的跟随、追加或改写 | `(user_id, operation)` 唯一；只覆盖创作层。任务事实和 JSON 输出契约由 `compilePrompt` 注入，不能写进这张表来绕过 |
+
+启动时 `EnsureDefaultPromptTemplates` 只为尚无任何版本的操作写入内置默认稿。新增操作（当前包括短剧大纲 `short_drama_outline` 和技能草稿 `skill_draft`）会在下次启动补种，不改已有操作的启用版本。
+
 ## 短剧分镜生产
 
 | 表 | 用途 | 关键边界 |
@@ -80,7 +89,7 @@ description: 影策后端核心持久化表与状态边界
 | `GET /api/projects/:id/units` | 全部章节摘要与字数，不包含正文 |
 | `GET /api/projects/:id/units/:unitId` | 单章正文 |
 | `GET /api/projects/:id/units/:unitId/workspace` | 当前章节的镜头、版本、产物、引用、候选、相关任务和已绑定资产 |
-| `GET /api/projects/:id/canvases` | 项目画布与当前页章节关联，使用 `page`、`page_size` |
+| `GET /api/projects/:id/canvases` | 项目画布与当前页章节关联，使用 `page`、`pageSize` |
 | `GET /api/projects/:id/assets` | 项目资产分页、分类/目录计数，支持分类、媒体类型、目录和关键词筛选 |
 | `GET /api/projects/:id/asset-candidates` | 资产候选分页，支持章节、状态、分类和名称关键词筛选 |
 
