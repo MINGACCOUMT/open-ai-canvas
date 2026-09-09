@@ -204,7 +204,7 @@ export function CanvasNodeLightingPanel({ dataUrl, onClose, onConfirm }: { dataU
             initial={reducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.97 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             transition={reducedMotion ? { duration: 0 } : aceternityMotion.spring.panel}
-            className="w-[700px] max-w-full overflow-hidden rounded-[var(--r-2xl)] border backdrop-blur-2xl"
+            className="w-full max-w-full overflow-hidden rounded-[var(--r-2xl)] border backdrop-blur-2xl"
             style={{ background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text, boxShadow: `0 28px 80px ${theme.spatial.shadow}` }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
@@ -237,7 +237,7 @@ export function CanvasNodeLightingPanel({ dataUrl, onClose, onConfirm }: { dataU
                 </div>
 
                 {/* Middle col: global controls */}
-                <div className="flex flex-col gap-3 border-r px-3 py-3" style={{ width: 210, borderColor: theme.toolbar.border }}>
+                <div className="flex flex-col gap-3 border-r px-3 py-3" style={{ width: 280, borderColor: theme.toolbar.border }}>
                     <div className="flex items-center justify-between">
                         <span className="text-[var(--fs-tiny)] font-medium" style={{ color: theme.node.muted }}>全局</span>
                         <PanelToggle label="智能模式" checked={options.smartMode} onChange={(checked) => updateOption("smartMode", checked)} theme={theme} />
@@ -245,7 +245,7 @@ export function CanvasNodeLightingPanel({ dataUrl, onClose, onConfirm }: { dataU
 
                     <div className="space-y-1.5">
                         <div className="flex items-center gap-2">
-                            <span className="w-6 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>亮度</span>
+                            <span className="w-8 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>亮度</span>
                             <div className="min-w-0 flex-1"><Slider min={0} max={100} value={options.brightness} onChange={(value) => updateOption("brightness", value)} tooltip={{ formatter: (value) => `${value}%` }} /></div>
                             <div className="flex items-center gap-1 rounded-[var(--r-md)] border px-2 py-1 text-[11px]" style={{ borderColor: theme.toolbar.border, background: theme.toolbar.itemHover, color: theme.node.muted }}>
                                 <Sun className="size-3" />
@@ -255,7 +255,7 @@ export function CanvasNodeLightingPanel({ dataUrl, onClose, onConfirm }: { dataU
                     </div>
 
                     <div className="flex items-center gap-2">
-                        <span className="w-6 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>颜色</span>
+                        <span className="w-8 text-[var(--fs-tiny)]" style={{ color: theme.node.muted }}>颜色</span>
                         <div className="relative flex items-center">
                             <label
                                 className="relative h-6 w-10 cursor-pointer overflow-hidden rounded border"

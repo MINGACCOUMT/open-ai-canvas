@@ -2521,7 +2521,7 @@ function InfiniteCanvasPage() {
                             centered
                             title="打光效果"
                             footer={null}
-                            width={740}
+                            width={900}
                             destroyOnHidden
                             onCancel={() => setLightingNodeId(null)}
                         >

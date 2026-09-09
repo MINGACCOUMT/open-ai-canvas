@@ -2,6 +2,7 @@
 out/
 node_modules/
 docs/*
+open-storyboard-canvas/
 !docs/design/
 !docs/index.md
 !docs/adr/
@@ -57,3 +58,4 @@ camera_language_guide.md
 .superdesign
 .playwright-cli/
 /project-memory/
+open-storyboard-canvas
