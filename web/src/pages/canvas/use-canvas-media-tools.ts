@@ -7,6 +7,7 @@ import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node
 import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import type { CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
+import { buildLightingLabel, type CanvasImageLightingOptions } from "@/components/canvas/canvas-node-lighting-dialog";
 import type { CanvasImageEmotionPayload } from "@/components/canvas/canvas-node-emotion-panel";
 import type { CanvasVideoFrameParams } from "@/components/canvas/canvas-video-frame-dialog";
 import type { CanvasVideoSegmentParams } from "@/components/canvas/canvas-video-segment-dialog";
@@ -104,6 +105,7 @@ export function useCanvasMediaTools({
     const [splitNodeId, setSplitNodeId] = useState<string | null>(null);
     const [upscaleNodeId, setUpscaleNodeId] = useState<string | null>(null);
     const [angleNodeId, setAngleNodeId] = useState<string | null>(null);
+    const [lightingNodeId, setLightingNodeId] = useState<string | null>(null);
     const [emotionNodeId, setEmotionNodeId] = useState<string | null>(null);
     const [frameDialogNodeId, setFrameDialogNodeId] = useState<string | null>(null);
     const [extractingVideoFramesNodeId, setExtractingVideoFramesNodeId] = useState<string | null>(null);
@@ -780,6 +782,50 @@ export function useCanvasMediaTools({
         }
     }, [bindGenerationTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, nodesRef, persistMediaNodes, projectId, resolveImageEditStyle, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedNodeIds, startGenerationRequest]);
 
+    const generateLightingNode = useCallback(async (node: CanvasNodeData, options: CanvasImageLightingOptions, prompt: string) => {
+        if (!node.metadata?.content) return;
+        const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
+        if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            navigateToSettings({ continueCreation: true });
+            return;
+        }
+        const childId = nanoid();
+        const imageSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
+        const title = buildLightingLabel(options);
+        const source = nodeReferenceImage(node);
+        if (!source) return;
+        const styleExecution = resolveImageEditStyle(node, prompt, generationConfig);
+        if (!styleExecution) return;
+        const { prompt: effectivePrompt, metadata: styleMetadata } = styleExecution;
+        const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
+        setLightingNodeId(null);
+        setRunningNodeId(childId);
+        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: imageSpec.width, height: imageSpec.height, metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, ...generationMetadata, ...styleMetadata } }]);
+        setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+        setSelectedNodeIds(new Set([childId]));
+        setDialogNodeId(childId);
+        const controller = startGenerationRequest(childId, node.id, childId);
+        try {
+            const result = await runBackendCanvasGenerationTask({ projectId, nodeId: childId, mode: "image", prompt: effectivePrompt, config: generationConfig, referenceImages: [source], signal: controller.signal, metadata: { sourceNodeId: node.id, edit: "lighting", lighting: options, ...styleMetadata }, onTaskCreated: (task) => bindGenerationTask(childId, task) });
+            const image = result.images?.[0];
+            if (!image?.dataUrl) throw new Error("后端任务没有返回图片");
+            const uploaded = await uploadImage(image.dataUrl);
+            const size = fitNodeSize(uploaded.width, uploaded.height, imageSpec.width, imageSpec.height);
+            const currentNode = nodesRef.current.find((item) => item.id === childId);
+            if (!currentNode) throw new Error("打光生成节点已被删除");
+            const finalizedNode = { ...currentNode, width: size.width, height: size.height, metadata: { ...currentNode.metadata, ...imageMetadata(uploaded), prompt: effectivePrompt, ...generationMetadata } };
+            setNodes((current) => current.map((item) => item.id === childId ? finalizedNode : item));
+            await persistMediaNodes([finalizedNode]);
+        } catch (error) {
+            if (isGenerationCanceled(error)) return;
+            const details = generationErrorMessage(error);
+            setNodes((current) => current.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: details } } : item));
+        } finally {
+            finishGenerationRequest(childId, controller);
+            setRunningNodeId(null);
+        }
+    }, [bindGenerationTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, nodesRef, persistMediaNodes, projectId, resolveImageEditStyle, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedNodeIds, startGenerationRequest]);
+
     const generateEmotionNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageEmotionPayload) => {
         if (!node.metadata?.content) return;
         const baseConfig = buildGenerationConfig(effectiveConfig, node, "image");
@@ -845,6 +891,7 @@ export function useCanvasMediaTools({
 
     return {
         angleNodeId,
+        lightingNodeId,
         emotionNodeId,
         annotationNodeId,
         createImageReversePromptNodes,
@@ -859,6 +906,7 @@ export function useCanvasMediaTools({
         frameDialogNodeId,
         handleSegmentConfirm,
         generateAngleNode,
+        generateLightingNode,
         maskEditImageNode,
         maskEditNodeId,
         mergeSelectedVideos,
@@ -871,6 +919,7 @@ export function useCanvasMediaTools({
         setFrameDialogNodeId,
         setSegmentDialogNodeId,
         setAngleNodeId,
+        setLightingNodeId,
         generateEmotionNode,
         setEmotionNodeId,
         setAnnotationNodeId,

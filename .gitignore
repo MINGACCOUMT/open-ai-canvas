@@ -1,6 +1,7 @@
 .next/
 out/
 node_modules/
+open-storyboard-canvas/
 docs/*
 !docs/design/
 !docs/index.md

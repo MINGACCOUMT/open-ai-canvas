@@ -7,6 +7,7 @@ import { buildGenerationConfig, isGenerationCanceled } from "@/lib/canvas/canvas
 import { canvasGenerationPromptMetadata, canvasGenerationRequestFingerprint, runCanvasGenerationSubmissionOnce } from "@/lib/canvas/canvas-generation-submission";
 import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-batch";
 import { buildPortraitTexturePrompt } from "@/lib/canvas/canvas-portrait-texture";
+import { buildCameraPrompt } from "@/lib/canvas/camera-prompt-library";
 import { buildTextRewritePrompt } from "@/lib/prompts";
 import { resolveCanvasStyleExecution } from "@/lib/canvas/canvas-style-execution";
 import { generationErrorMessage, generationFailureMetadata } from "@/lib/generation-error";
@@ -130,7 +131,12 @@ export function useCanvasGenerationExecutor({
 
                     const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
                     const editingTextNode = mode === "text" && Boolean(sourceTextContent);
-                    const generationPrompt = mode === "image" && sourceNode?.metadata?.portraitTexture ? buildPortraitTexturePrompt(prompt, sourceNode.metadata.portraitTexture) : prompt;
+                    let generationPrompt = mode === "image" && sourceNode?.metadata?.portraitTexture ? buildPortraitTexturePrompt(prompt, sourceNode.metadata.portraitTexture) : prompt;
+                    if (mode === "image" && sourceNode?.metadata?.cameraControl?.enabled) {
+                        const cameraControl = sourceNode.metadata.cameraControl;
+                        const cameraPrompt = buildCameraPrompt({ cameraId: cameraControl.camera, lensId: cameraControl.lens, focalLengthMm: cameraControl.focalLength, apertureF: cameraControl.aperture });
+                        generationPrompt = `${generationPrompt}\n${cameraPrompt}`;
+                    }
                     const isPreparingEmptyImage = mode === "image" && sourceNode?.type === CanvasNodeType.Image && !sourceNode.metadata?.content;
 
                     let rawGenerationContext: Awaited<ReturnType<typeof hydrateNodeGenerationContext>>;
