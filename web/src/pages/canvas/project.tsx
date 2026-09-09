@@ -49,6 +49,7 @@ import { CanvasTimelineDialog } from "@/components/canvas/canvas-timeline-dialog
 import { syncNodeSubtitlesToTimeline } from "@/lib/timeline/timeline-build";
 import type { TimelineDirectMedia } from "@/types/timeline";
 import { CanvasNodeAnglePanel } from "@/components/canvas/canvas-node-angle-dialog";
+import { CanvasNodeLightingPanel } from "@/components/canvas/canvas-node-lighting-dialog";
 import { CanvasTextEditorModal } from "@/components/canvas/canvas-text-editor-modal";
 import { CanvasNodeSearchModal } from "@/components/canvas/canvas-node-search-modal";
 import { CanvasStylePickerModal } from "@/components/canvas/canvas-style-picker-modal";
@@ -844,6 +845,7 @@ function InfiniteCanvasPage() {
 
     const {
         angleNodeId,
+        lightingNodeId,
         emotionNodeId,
         annotationNodeId,
         createImageReversePromptNodes,
@@ -857,6 +859,7 @@ function InfiniteCanvasPage() {
         extractingVideoFramesNodeId,
         frameDialogNodeId,
         generateAngleNode,
+        generateLightingNode,
         generateEmotionNode,
         handleSegmentConfirm,
         maskEditImageNode,
@@ -871,6 +874,7 @@ function InfiniteCanvasPage() {
         setFrameDialogNodeId,
         setSegmentDialogNodeId,
         setAngleNodeId,
+        setLightingNodeId,
         setEmotionNodeId,
         setAnnotationNodeId,
         setCropNodeId,
@@ -923,6 +927,7 @@ function InfiniteCanvasPage() {
             setSplitNodeId(clearDeletedId);
             setUpscaleNodeId(clearDeletedId);
             setAngleNodeId(clearDeletedId);
+            setLightingNodeId(clearDeletedId);
             setEmotionNodeId(clearDeletedId);
             setSuperResolveNodeId(clearDeletedId);
             setPreviewNodeId(clearDeletedId);
@@ -940,7 +945,7 @@ function InfiniteCanvasPage() {
             }
             cleanupCanvasFiles({ projectId, nodes: nextNodes, chatSessions });
         },
-        [chatSessions, cleanupCanvasFiles, message, projectId, setAngleNodeId, setAnnotationNodeId, setArtCritiqueNodeId, setCropNodeId, setEmotionNodeId, setFrameDialogNodeId, setMaskEditNodeId, setSegmentDialogNodeId, setSplitNodeId, setUpscaleNodeId, setRunningNodeId],
+        [chatSessions, cleanupCanvasFiles, message, projectId, setAngleNodeId, setAnnotationNodeId, setArtCritiqueNodeId, setCropNodeId, setEmotionNodeId, setFrameDialogNodeId, setLightingNodeId, setMaskEditNodeId, setSegmentDialogNodeId, setSplitNodeId, setUpscaleNodeId, setRunningNodeId],
     );
 
     const {
@@ -1279,6 +1284,7 @@ function InfiniteCanvasPage() {
         activeScriptNode,
         activeStylePresetId,
         angleNode,
+        lightingNode,
         emotionNode,
         annotationNode,
         batchChildCountById,
@@ -1329,6 +1335,7 @@ function InfiniteCanvasPage() {
         upscaleNodeId,
         superResolveNodeId,
         angleNodeId,
+        lightingNodeId,
         emotionNodeId,
         previewNodeId,
         contextMenu,
@@ -1581,6 +1588,7 @@ function InfiniteCanvasPage() {
         setMaskEditNodeId(null);
         setAnnotationNodeId(null);
         setAngleNodeId(null);
+        setLightingNodeId(null);
         setEmotionNodeId(null);
         setPreviewNodeId(null);
         setRunningNodeId(null);
@@ -2507,6 +2515,26 @@ function InfiniteCanvasPage() {
                         </Modal>
                     ) : null}
 
+                    {lightingNode?.metadata?.content ? (
+                        <Modal
+                            open
+                            centered
+                            title="打光效果"
+                            footer={null}
+                            width={740}
+                            destroyOnHidden
+                            onCancel={() => setLightingNodeId(null)}
+                        >
+                            <CanvasNodeLightingPanel
+                                dataUrl={lightingNode.metadata.content}
+                                onClose={() => setLightingNodeId(null)}
+                                onConfirm={(options, prompt) => {
+                                    void generateLightingNode(lightingNode, options, prompt);
+                                }}
+                            />
+                        </Modal>
+                    ) : null}
+
                     {emotionNode?.metadata?.content && !isCanvasNodeMoving ? (
                         <CanvasEmotionWorkspace
                             node={emotionNode}
@@ -2607,6 +2635,10 @@ function InfiniteCanvasPage() {
                         onAngle={(node) => {
                             setDialogNodeId(null);
                             setAngleNodeId((current) => (current === node.id ? null : node.id));
+                        }}
+                        onLighting={(node) => {
+                            setDialogNodeId(null);
+                            setLightingNodeId((current) => (current === node.id ? null : node.id));
                         }}
                         onViewImage={(node) => setPreviewNodeId(node.id)}
                         onExtractVideoFrames={openVideoFrameExtractor}
