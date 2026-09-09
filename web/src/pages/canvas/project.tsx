@@ -290,6 +290,8 @@ function InfiniteCanvasPage() {
     const [scriptEditorNodeId, setScriptEditorNodeId] = useState<string | null>(null);
     const [portraitClearanceNodeId, setPortraitClearanceNodeId] = useState<string | null>(null);
     const [artCritiqueNodeId, setArtCritiqueNodeId] = useState<string | null>(null);
+    const artCritiqueRunningRef = useRef(false);
+    const [artCritiqueStartRequest, setArtCritiqueStartRequest] = useState<{ nodeId: string; id: string; restart: boolean } | null>(null);
     const [scriptScrollTopById, setScriptScrollTopById] = useState<Record<string, number>>({});
     const [directorNodeId, setDirectorNodeId] = useState<string | null>(null);
     const [versionCompareRootId, setVersionCompareRootId] = useState<string | null>(null);
@@ -551,6 +553,21 @@ function InfiniteCanvasPage() {
         }
         openAgent("local");
     }, [codexAutoConnect, codexCompactAgent, openAgent, projectLoaded, setAgentMode]);
+
+    useEffect(() => {
+        const sessionId = searchParams.get("conversation");
+        if (!projectLoaded || !sessionId) return;
+        if (!chatSessions.some((session) => session.id === sessionId)) {
+            message.warning("未找到要接续的会话，请从首页重新进入。");
+        } else {
+            activeChatIdRef.current = sessionId;
+            setActiveChatId(sessionId);
+            openAgent("online");
+        }
+        const next = new URLSearchParams(searchParams);
+        next.delete("conversation");
+        setSearchParams(next, { replace: true });
+    }, [projectLoaded, chatSessions, searchParams, setSearchParams, openAgent, message]);
 
     // 沉浸专注进入时收起智能体与小地图、重置 Dock 唤出态；仅响应「进入」瞬间，避免关闭专注内主动唤出的面板。
     const prevFocusModeRef = useRef(focusMode);
@@ -1433,7 +1450,8 @@ function InfiniteCanvasPage() {
         focusSelection: fitCanvasSelection,
     });
 
-    const { selectCanvasStyle, styleApplying } = useCanvasStyleWorkflow({
+    const { selectCanvasStyle, applyCanvasStyleAsync, styleApplying } = useCanvasStyleWorkflow({
+        canvasId: projectId,
         domainProjectId: currentProject?.projectId,
         nodesRef,
         selectedNodeIdsRef,
@@ -2131,6 +2149,7 @@ function InfiniteCanvasPage() {
                             onRedo={redoCanvas}
                             onShare={() => setShareModalOpen(true)}
                             agentOpen={assistantOpen}
+                            agentPanelWidth={assistantMounted ? assistantWidth : undefined}
                             compactAgentStatus={codexCompactAgent ? { connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity } : undefined}
                             onToggleAgent={() => (assistantOpen ? closeAgent() : openAgent())}
                             shortcutRequestNonce={shortcutRequestNonce}
@@ -2379,7 +2398,7 @@ function InfiniteCanvasPage() {
                         </div>
 
                         {assistantMounted ? (
-                            <AssistantPanelColumn width={assistantWidth} closing={assistantClosing} topInset={focusMode ? "0px" : "var(--canvas-topbar-offset)"} onWidthChange={setAssistantWidth}>
+                                    <AssistantPanelColumn width={assistantWidth} closing={assistantClosing} topInset="0px" onWidthChange={setAssistantWidth}>
                                 {(resizing) => (
                                     <CanvasAssistantPanel
                                         nodes={nodes}
@@ -2391,6 +2410,13 @@ function InfiniteCanvasPage() {
                                         onSelectNodeIds={setSelectedNodeIds}
                                         onSessionsChange={handleAssistantSessionsChange}
                                         onApplyOps={applyAgentOps}
+                                        onApplyStyle={applyCanvasStyleAsync}
+                                        onGenerateStoryboard={generateScriptRows}
+                                        onStartArtCritique={(nodeId, restart) => {
+                                            if (artCritiqueRunningRef.current) throw new Error("已有审美分析正在进行，请先完成或停止当前分析");
+                                            setArtCritiqueStartRequest({ nodeId, id: nanoid(), restart });
+                                            setArtCritiqueNodeId(nodeId);
+                                        }}
                                         canUndoOps={canUndoAgentOps}
                                         undoOpsCount={agentUndoCount}
                                         onUndoOps={undoAgentOps}
@@ -2759,6 +2785,9 @@ function InfiniteCanvasPage() {
                         />
 
                         <AiArtCritiqueModal
+                            startRequestId={artCritiqueStartRequest && artCritiqueStartRequest.nodeId === artCritiqueNode?.id ? artCritiqueStartRequest.id : undefined}
+                            restartRequested={artCritiqueStartRequest?.nodeId === artCritiqueNode?.id && artCritiqueStartRequest?.restart}
+                            onRunningChange={(running) => { artCritiqueRunningRef.current = running; }}
                             node={artCritiqueNode}
                             upstreamNodes={artCritiqueInputs}
                             open={Boolean(artCritiqueNode)}

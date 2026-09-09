@@ -2,9 +2,13 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { App, Spin } from "antd";
 import { Tooltip } from "@/components/ui/base/tooltip";
 import { History } from "lucide-react";
+import { useNavigate } from "react-router";
 
 import type { AssetLibraryPickerItem } from "@/components/assets/asset-library-picker-modal";
 import { generationErrorCode, generationErrorMessage } from "@/lib/generation-error";
+import { creationResultAssetIds } from "@/lib/canvas/canvas-asset-handoff";
+import { getActiveUserScope } from "@/lib/user-scope";
+import { continueCreationConversationOnCanvas } from "@/services/creation-canvas-conversation";
 import { useExternalAssetSources } from "@/hooks/use-external-asset-sources";
 import { modelCapabilityConfigFor, normalizeImageValue, normalizeVideoValue, videoDurationAllowed, videoDurationOptions } from "@/lib/model-capabilities";
 import { inferVideoOperation, resolveCompatibleModel, mergedImageCapabilityConfig, type ModelRequirements } from "@/lib/model-selection";
@@ -51,6 +55,9 @@ function writeComposerPref(key: string, value: boolean) {
 
 export default function CreatePage() {
     const { message: toast, modal } = App.useApp();
+    const navigate = useNavigate();
+    const [openingCanvas, setOpeningCanvas] = useState(false);
+    const openingCanvasRef = useRef(false);
     const brandName = useAppearanceStore((state) => state.appearance.brandName);
     const config = useEffectiveConfig();
     const composerPreferencesHydrated = useCreationPreferencesStore((state) => state.hydrated);
@@ -722,6 +729,42 @@ export default function CreatePage() {
         setHistoryOpen(false);
     };
 
+    const continueOnCanvas = async (selectedAssetIds?: string[]) => {
+        if (!activeConversation || openingCanvasRef.current) return;
+        openingCanvasRef.current = true;
+        setOpeningCanvas(true);
+        const scope = getActiveUserScope();
+        const source = activeConversation;
+        try {
+            const assets = useAssetStore.getState().assets;
+            const generatedAssetIds = selectedAssetIds || source.messages.flatMap((item) => {
+                if (!item.resultUrls?.length) return [];
+                const ids = creationResultAssetIds(assets, { messageId: item.id, taskIds: item.taskIds || [], resultUrls: item.resultUrls });
+                if (ids.length !== item.resultUrls.length) throw new Error("部分生成素材还未保存完成，请稍后转入画布。");
+                return ids;
+            });
+            const referenceKeys = new Set(source.messages.flatMap((item) => (item.attachments || []).map((attachment) => attachment.storageKey).filter(Boolean)));
+            const referenceAssetIds = assets.filter((asset) => (asset.kind === "image" || asset.kind === "video") && asset.data.storageKey && referenceKeys.has(asset.data.storageKey)).map((asset) => asset.id);
+            const assetIds = [...generatedAssetIds, ...referenceAssetIds];
+            const result = await continueCreationConversationOnCanvas(source);
+            if (scope !== getActiveUserScope()) return;
+            const next = updateCreationConversationSnapshot(conversationsRef.current, source.id, (item) => ({ ...item, canvasId: result.id }));
+            conversationsRef.current = next;
+            setConversations(next);
+            await saveCreationConversations(next);
+            if (scope !== getActiveUserScope()) return;
+            if (result.syncError) toast.warning("会话已保存在本机，云端同步尚未完成。");
+            const params = new URLSearchParams({ conversation: result.sessionId });
+            if (assetIds.length) {
+                params.set("mode", "handoff");
+                [...new Set(assetIds)].forEach((id) => params.append("asset", id));
+            }
+            navigate(`/canvas/${result.id}?${params.toString()}`);
+        } catch (cause) {
+            if (scope === getActiveUserScope()) toast.error(cause instanceof Error ? cause.message : "转入画布失败，原会话已保留");
+        } finally { openingCanvasRef.current = false; setOpeningCanvas(false); }
+    };
+
     const selectConversation = (conversation: CreationConversation) => {
         followLatestMessageRef.current = true;
         setActiveId(conversation.id);
@@ -913,13 +956,15 @@ export default function CreatePage() {
                 />
             </main>
             </> : <div className="creation-thread-workbench">
-                <CreationWorkspaceToolbar onNewConversation={startNewConversation} onOpenHistory={() => setHistoryOpen(true)} shots={videoShots} onJumpToShot={jumpToShot} />
+                <CreationWorkspaceToolbar onNewConversation={startNewConversation} onOpenHistory={() => setHistoryOpen(true)} shots={videoShots} onJumpToShot={jumpToShot} onContinueCanvas={() => void continueOnCanvas()} openingCanvas={openingCanvas} />
                 <main ref={threadScrollRef} onScroll={handleThreadScroll} className="creation-thread-scroll creation-scrollbar">
                     <section className="creation-thread-stage"><div className="creation-results">{activeConversation.messages.map((item, index) => <div key={item.id} id={`creation-shot-${item.id}`} className="creation-thread-message"><CreationMessageView
                         item={item}
                         shotNumber={creationVideoShotOrdinal(videoShots, item)}
                         onRetryFailure={() => retryFailedMessage(item, index)}
                         onCreateVariant={() => createVariant(item, index)}
+                        onContinueCanvas={(ids) => void continueOnCanvas(ids)}
+                        openingCanvas={openingCanvas}
                         onEditUserMessage={(text) => { setPrompt(text); window.requestAnimationFrame(() => composerFocusRef.current?.focus()); }}
                     /></div>)}</div></section>
                 </main>

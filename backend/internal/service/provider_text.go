@@ -19,6 +19,16 @@ import (
 )
 
 func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	// 浏览器持久化的是协议中立请求；资源水合和模型路由完成后才展开上游协议，
+	// 防止供应商请求体反向污染任务记录，也避免切换模型时复用错误协议。
+	if input.AgentRequests != nil && input.AgentRequests.Canonical != nil {
+		_, declarative := agentProtocolAdapterForContext(ctx, input.Config.InterfaceType)
+		requests, err := expandCanonicalAgentRequest(input.AgentRequests.Canonical, input.Config, declarative)
+		if err != nil {
+			return nil, err
+		}
+		input.AgentRequests = requests
+	}
 	if adapter, ok := agentProtocolAdapterForContext(ctx, input.Config.InterfaceType); ok {
 		return runDeclarativeAgentTask(ctx, input, adapter)
 	}
@@ -33,6 +43,9 @@ func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[str
 		path = "/responses"
 		protocol = "responses"
 	} else if input.Config.InterfaceType == string(model.ChannelInterfaceClaudeAPI) {
+		if input.AgentRequests.Claude != nil {
+			request = input.AgentRequests.Claude
+		}
 		path = "/messages"
 		protocol = "claude-api"
 	}
@@ -40,7 +53,7 @@ func runAgentToolTask(ctx context.Context, input canvasGenerationInput) (map[str
 		return nil, errors.New("画布 Agent 工具请求缺少协议参数")
 	}
 	body := cloneStringAnyMap(request)
-	if protocol == "claude-api" {
+	if protocol == "claude-api" && input.AgentRequests.Claude == nil {
 		body = claudeAgentBody(body)
 	}
 	body["model"] = input.Config.Model

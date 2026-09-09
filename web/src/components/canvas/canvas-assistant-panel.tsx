@@ -1,14 +1,21 @@
+import { canvasThemes } from "@/lib/canvas-theme";
 import { Button, Modal } from "antd";
 import { Tooltip } from "@/components/ui/base/tooltip";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { X } from "lucide-react";
 
 import { motion } from "motion/react";
 
 import { resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { canvasThemes } from "@/lib/canvas-theme";
 import { nanoid } from "nanoid";
 import { type ResponseInputMessage, type ResponseToolCall } from "@/services/api/image";
+import { inspectAgentImage } from "@/services/agent-image-preview";
+import { listAgentCapabilities, readAgentPluginDocumentation, readAgentPluginNode } from "@/services/agent-capabilities";
+import { readAgentStoryboard } from "@/lib/canvas/canvas-agent-storyboard";
+import { canvasStylePresets, userStylePreset, type CanvasStylePreset } from "./canvas-style-picker-modal";
+import { listStyleProfiles } from "@/services/api/style-profiles";
+import { getActiveUserScope } from "@/lib/user-scope";
+import { isPluginEffectivelyEnabled } from "@/stores/use-plugin-store";
 import { consumeGenerationTaskAgent } from "@/services/project-asset-sync";
 import { applyGenerationConsumerEffect, generationEffectApplied } from "@/services/generation-consumer-dedupe";
 import { activeGenerationConsumerController } from "@/services/generation-consumer-lifecycle";
@@ -32,8 +39,11 @@ import { isWritableToolCall } from "@/lib/canvas/canvas-agent-protocol";
 import { listAddedSkills, type Skill } from "@/services/api/skills";
 import { buildSkillMentionReferences, skillRuntime } from "@/services/skill-runtime";
 import { handleCinematicContinuationFailure, canvasCinematicContinuationEntryAdapters, type CinematicContinuationFailureDisposition, type CinematicContinuationLiveSessionState } from "./canvas-cinematic-continuation";
+import { CanvasCreativeInteraction, canvasCreativeDetail } from "./canvas-creative-interaction";
+import { creativePlan } from "@/lib/creation/creative-agent-state";
+import { CreativePlanBar } from "@/components/creation/creative-agent-cards";
 import { AgentTextModelPicker, AssistantHistory, AssistantReferenceChip, MessageReferences, assistantImageReferenceLabel, assistantMessageToChatMessage, assistantReferencesToMentionReferences, promptAlreadyHasMention } from "./canvas-assistant-panel-views";
-import { backendAgentProviderConfig, buildAssistantReferences, buildToolAgentMessages, cinematicSessionMessageId, compactSnapshot, createSession, describeCanvasSnapshot, explainNoop, nodeToReference, objectDetail, onlineToolToOps, parseToolArguments, previewOnlineToolCalls, requestOnlineAgentModel, requireOps, requireString, snapshotSignature, summarizeToolCalls, toolCallToResponseInput, toolCallsFromDetail, toolResultText, upsertAssistantMessage, type OnlineToolResult } from "./canvas-assistant-online-tools";
+import { backendAgentProviderConfig, buildAssistantReferences, buildToolAgentMessages, capabilityBatchTitle, cinematicSessionMessageId, compactSnapshot, createSession, describeCanvasSnapshot, explainNoop, nodeToReference, objectDetail, onlineToolToOps, parseToolArguments, previewOnlineToolCalls, requestOnlineAgentModel, requireOps, requireString, snapshotSignature, summarizeToolCalls, toolCallToResponseInput, toolCallsFromDetail, toolResultText, upsertAssistantMessage, type OnlineToolResult } from "./canvas-assistant-online-tools";
 
 export const CANVAS_AGENT_PANEL_MOTION_MS = 500;
 const PANEL_MOTION_SECONDS = CANVAS_AGENT_PANEL_MOTION_MS / 1000;
@@ -53,6 +63,9 @@ type CanvasAssistantPanelProps = {
     onSelectNodeIds: (ids: Set<string>) => void;
     onSessionsChange: (sessions: CanvasAssistantSession[], activeSessionId: string | null) => void;
     onApplyOps: (ops?: CanvasAgentOp[], context?: { conversationId?: string; messageId?: string; source?: "online" | "local" }) => Promise<CanvasAgentSnapshot>;
+    onApplyStyle: (preset: CanvasStylePreset) => Promise<void>;
+    onStartArtCritique: (nodeId: string, restart: boolean) => void;
+    onGenerateStoryboard: (nodeId: string, prompt: string, signal?: AbortSignal) => Promise<boolean | undefined>;
     canUndoOps: boolean;
     undoOpsCount: number;
     onUndoOps: () => CanvasAgentSnapshot | null;
@@ -79,6 +92,9 @@ export function CanvasAssistantPanel({
     onSelectNodeIds,
     onSessionsChange,
     onApplyOps,
+    onApplyStyle,
+    onStartArtCritique,
+    onGenerateStoryboard,
     canUndoOps,
     undoOpsCount,
     onUndoOps,
@@ -102,12 +118,12 @@ export function CanvasAssistantPanel({
     const setAgentState = useCanvasAgentStore((state) => state.setAgentState);
     const [view, setView] = useState<OnlineAgentTab>("chat");
     const [prompt, setPrompt] = useState("");
-    const [cinematicEntryActive, setCinematicEntryActive] = useState(cinematicEntry);
     const [isRunning, setIsRunning] = useState(false);
+    const [creativeBusy, setCreativeBusy] = useState<Record<string, boolean>>({});
     const [deleteChatIds, setDeleteChatIds] = useState<string[]>([]);
     const [composerSkills, setComposerSkills] = useState<Skill[]>([]);
     const [attachedReferenceIds, setAttachedReferenceIds] = useState<Set<string>>(() => new Set());
-    const [localSessions, setLocalSessions] = useState<CanvasAssistantSession[]>(() => (sessions.length ? sessions : [createSession()]));
+    const [localSessions, setLocalSessionsState] = useState<CanvasAssistantSession[]>(() => (sessions.length ? sessions : [createSession()]));
     const localSessionsRef = useRef(localSessions);
     const [localActiveSessionId, setLocalActiveSessionIdState] = useState<string | null>(activeSessionId);
     const localActiveSessionIdRef = useRef(localActiveSessionId);
@@ -115,10 +131,17 @@ export function CanvasAssistantPanel({
         localActiveSessionIdRef.current = activeId;
         setLocalActiveSessionIdState(activeId);
     };
-    const applyingExternalSessionsRef = useRef(false);
+    const setLocalSessions = (value: CanvasAssistantSession[] | ((previous: CanvasAssistantSession[]) => CanvasAssistantSession[])) => {
+        const next = typeof value === "function" ? value(localSessionsRef.current) : value;
+        localSessionsRef.current = next;
+        setLocalSessionsState(next);
+        onSessionsChange(next, localActiveSessionIdRef.current);
+    };
     const chatListRef = useRef<HTMLDivElement>(null);
+    const composerRef = useRef<HTMLDivElement>(null);
     const snapshotRef = useRef(snapshot);
     const pendingToolContextRef = useRef(new Map<string, PendingOnlineToolContext>());
+    const inspectedImagesRef = useRef(new Map<string, { title: string; url: string; encodedBytes: number }>());
     const cinematicSessionControllersRef = useRef(new Map<string, AbortController>());
     const generationConsumerControllerRef = useRef(new AbortController());
 
@@ -137,13 +160,15 @@ export function CanvasAssistantPanel({
     }, []);
 
     useEffect(() => {
-        if (!sessions.length) return;
-        if (sessions === localSessions && activeSessionId === localActiveSessionId) return;
-        applyingExternalSessionsRef.current = true;
+        if (!sessions.length) {
+            onSessionsChange(localSessionsRef.current, localActiveSessionIdRef.current);
+            return;
+        }
         localSessionsRef.current = sessions;
-        setLocalSessions(sessions);
-        setLocalActiveSessionId(activeSessionId);
-    }, [activeSessionId, sessions]);
+        setLocalSessionsState(sessions);
+        localActiveSessionIdRef.current = activeSessionId;
+        setLocalActiveSessionIdState(activeSessionId);
+    }, [activeSessionId, sessions, onSessionsChange]);
 
     useEffect(() => {
         snapshotRef.current = snapshot;
@@ -156,24 +181,19 @@ export function CanvasAssistantPanel({
             cinematicSessionControllersRef.current.forEach((controller) => controller.abort());
             cinematicSessionControllersRef.current.clear();
             generationConsumerControllerRef.current.abort();
+            inspectedImagesRef.current.clear();
         };
     }, []);
-
-    useEffect(() => {
-        if (applyingExternalSessionsRef.current) {
-            applyingExternalSessionsRef.current = false;
-            return;
-        }
-        if (sessions === localSessions && activeSessionId === localActiveSessionId) return;
-        onSessionsChange(localSessions, localActiveSessionId);
-    }, [activeSessionId, localActiveSessionId, localSessions, onSessionsChange, sessions]);
 
     const safeSessions = localSessions.length ? localSessions : [createSession()];
     const activeSession = useMemo(() => safeSessions.find((session) => session.id === localActiveSessionId) || safeSessions[0] || null, [localActiveSessionId, safeSessions]);
     const historySessions = safeSessions.filter((session) => session.messages.length > 0);
     const messages = activeSession?.messages || [];
     const hasMessages = messages.length > 0;
-    const agentBusy = isRunning || safeSessions.some((session) => session.pendingBackendSession?.status === "pending");
+    const agentBusy = isRunning || Object.values(creativeBusy).some(Boolean) || safeSessions.some((session) => session.pendingBackendSession?.status === "pending");
+    const activeCreativeId = messages.findLast((message) => Boolean(canvasCreativeDetail(message)))?.id;
+    const latestAssistantMessage = messages.findLast((message) => message.role === "assistant");
+    const currentCreativeState = activeCreativeId ? canvasCreativeDetail(messages.find((message) => message.id === activeCreativeId)!)?.state : latestAssistantMessage ? canvasCreativeDetail(latestAssistantMessage)?.state : undefined;
     const selectedReferences = useMemo(() => buildAssistantReferences(nodes, attachedReferenceIds), [attachedReferenceIds, nodes]);
     const composerImageReferences = useMemo(() => assistantReferencesToMentionReferences(selectedReferences), [selectedReferences]);
     const resolvedComposerImageReferences = useResolvedCanvasResourceReferences(composerImageReferences);
@@ -434,7 +454,7 @@ export function CanvasAssistantPanel({
                     const toolMessage: CanvasAssistantMessage = {
                         id: toolMessageId,
                         role: "tool",
-                        title: "确认工具调用",
+                        title: `确认${capabilityBatchTitle(result.toolCalls)}`,
                         text: summarizeToolCalls(result.toolCalls),
                         detail: { status: "pending", step: loop.step, toolCalls: result.toolCalls, impact: previewOnlineToolCalls(result.toolCalls, snapshotRef.current, effectiveConfig) },
                     };
@@ -487,7 +507,7 @@ export function CanvasAssistantPanel({
                 appendMessage(sessionId, {
                     id: toolMessageId,
                     role: "tool",
-                    title: "确认工具调用",
+                    title: `确认${capabilityBatchTitle(next.toolCalls)}`,
                     text: summarizeToolCalls(next.toolCalls),
                     detail: { status: "pending", step: step + 1, toolCalls: next.toolCalls, impact: previewOnlineToolCalls(next.toolCalls, snapshotRef.current, effectiveConfig) },
                 });
@@ -520,8 +540,64 @@ export function CanvasAssistantPanel({
             if (expectedRevision !== undefined && expectedRevision !== (current.revision ?? 0)) return { ok: false, message: "画布 revision 已变化，请重新读取 canvas_get_context 后再执行写操作。" };
             const expectedStateHash = typeof args.expectedStateHash === "string" ? args.expectedStateHash : "";
             if (expectedStateHash && expectedStateHash !== buildCanvasAgentContext(current).stateHash) return { ok: false, message: "画布状态已变化，请重新读取 canvas_get_context 后再执行写操作。" };
-            const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, composerSkills);
+            const currentSkills = skillRuntime.agentToolNames("onlineAgent").has(name) ? (await listAddedSkills()).skills : composerSkills;
+            const skillToolResult = await skillRuntime.executeAgentTool("onlineAgent", name, args, currentSkills);
             if (skillToolResult) return skillToolResult;
+            if (name === "canvas_generate_storyboard") {
+                const { node, readiness } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
+                if (!readiness.canGenerateStoryboard) throw new Error(readiness.blockingReason || "请先配置项目画风");
+                const prompt = requireString(args.prompt ?? node.metadata?.composerContent, "剧本与拆镜要求");
+                const completed = await onGenerateStoryboard(node.id, prompt, generationConsumerControllerRef.current.signal);
+                if (!completed) return { ok: true, waitForUser: true, message: "分镜生成未完成或已取消，请查看节点提示；未完成不代表已生成，不要自动重复发起。", data: { nodeId: node.id, completed: false } };
+                return { ok: true, message: "专业拆镜任务已完成并写入真实分镜表。请读取分镜表检查时长与镜头内容，再继续后续操作。", data: { nodeId: node.id, completed: true } };
+            }
+            if (name === "canvas_start_art_critique") {
+                const nodeId = requireString(args.nodeId, "nodeId");
+                const node = current.nodes.find((item) => item.id === nodeId && item.type === "ai-art-critique");
+                if (!node || !isPluginEffectivelyEnabled("ai-art-critique")) throw new Error("审美插件未启用或节点不存在");
+                const sources = current.nodes.filter((item) => item.type === "image" && current.connections.some((edge) => edge.fromNodeId === item.id && edge.toNodeId === nodeId));
+                if (sources.length !== 1) throw new Error("审美分析需要明确连接一张图片，请先整理输入连线");
+                const result = readAgentPluginNode(current, nodeId);
+                if (args.retry !== true && result.data.status === "completed") return { ok: true, message: "已复用当前图片的审美报告。", data: result };
+                onStartArtCritique(nodeId, args.retry === true);
+                return { ok: true, waitForUser: true, message: "已打开审美分析，请在面板中核对并确认费用。分析完成后，可让我读取报告并继续处理。", data: { nodeId, status: "analysis_requested", paymentApproved: false } };
+            }
+            if (name === "canvas_read_plugin_node") return { ok: true, message: "已读取插件节点状态。", data: readAgentPluginNode(current, requireString(args.nodeId, "nodeId")) };
+            if (name === "canvas_read_storyboard") {
+                const { node, rows, readiness } = readAgentStoryboard(current, requireString(args.nodeId, "nodeId"));
+                return { ok: true, message: "已读取分镜表及画风前置条件。", data: { nodeId: node.id, title: node.title, rows, readiness } };
+            }
+            if (name === "canvas_list_styles" || name === "canvas_apply_style") {
+                const originScope = getActiveUserScope();
+                const source = args.source || "system";
+                if (source !== "system" && source !== "user") throw new Error("画风来源必须是 system 或 user");
+                const presets = source === "system" ? canvasStylePresets.map((preset) => ({ id: preset.id, preset })) : (await listStyleProfiles()).profiles.flatMap((entity) => { const preset = userStylePreset(entity); return preset ? [{ id: entity.id, preset }] : []; });
+                if (getActiveUserScope() !== originScope || snapshotRef.current.projectId !== current.projectId || generationConsumerControllerRef.current.signal.aborted) throw new Error("画布或账号已切换，请重新读取画风");
+                if (name === "canvas_list_styles") {
+                    const query = typeof args.query === "string" ? args.query.toLocaleLowerCase().trim() : "";
+                    return { ok: true, message: "已读取画风目录。", data: presets.filter(({ preset }) => !query || `${preset.title} ${preset.description} ${preset.tags.join(" ")}`.toLocaleLowerCase().includes(query)).map(({ id, preset }) => ({ id, source, title: preset.title, description: preset.description, tags: preset.tags })) };
+                }
+                const selected = presets.find((item) => item.id === args.id);
+                if (!selected) throw new Error("画风不存在或已移除，请先读取真实画风目录");
+                await onApplyStyle(selected.preset);
+                return { ok: true, message: `已应用画风“${selected.preset.title}”。`, data: { source, id: selected.id, presetId: selected.preset.id, prompt: selected.preset.prompt } };
+            }
+            if (name === "canvas_read_plugin") return { ok: true, message: "已读取插件用法。", data: readAgentPluginDocumentation(requireString(args.pluginId, "pluginId")) };
+            if (name === "canvas_list_capabilities") return { ok: true, message: "已读取当前能力目录。", data: listAgentCapabilities(typeof args.query === "string" ? args.query : "") };
+            if (name === "canvas_inspect_image") {
+                const readSignal = generationConsumerControllerRef.current.signal;
+                const node = current.nodes.find((item) => item.id === args.id && item.type === "image");
+                if (!node || !messageId) throw new Error("未找到当前画布中的图片节点，请先检索真实节点 id。");
+                const detail = args.detail;
+                if (detail !== "preview" && detail !== "original" && detail !== "crop") throw new Error("请指定 preview、original 或 crop 看图方式。");
+                const crop = args.crop as { x: number; y: number; width: number; height: number } | undefined;
+                const image = await inspectAgentImage({ storageKey: node.metadata?.storageKey, dataUrl: node.metadata?.content }, detail, crop);
+                if (readSignal.aborted) throw new DOMException("页面已关闭", "AbortError");
+                if (snapshotRef.current.projectId !== current.projectId || !snapshotRef.current.nodes.some((item) => item.id === node.id && item.metadata?.storageKey === node.metadata?.storageKey && item.metadata?.content === node.metadata?.content)) throw new Error("画布素材已变化，请重新读取。");
+                if ([...inspectedImagesRef.current.values()].reduce((sum, item) => sum + item.encodedBytes, image.encodedBytes) > 6 * 1024 * 1024) throw new Error("本轮看图预算已满，请先分析已读取图片，下一轮再读其他图片。");
+                inspectedImagesRef.current.set(messageId, { title: `${node.title}（${detail}${crop ? ` ${JSON.stringify(crop)}` : ""}）`, url: image.storageKey, encodedBytes: image.encodedBytes });
+                return { ok: true, message: `已读取图片《${node.title}》，将以${detail === "preview" ? "构图预览" : detail === "crop" ? "原始像素局部" : "原图"}提供给模型。`, data: { nodeId: node.id, detail, crop } };
+            }
             if (name === "canvas_get_state") return { ok: true, message: describeCanvasSnapshot(current), data: compactSnapshot(current) };
             if (name === "canvas_get_context") return { ok: true, message: "已读取语义化画布上下文。", data: buildCanvasAgentContext(current) };
             if (name === "canvas_find_nodes") return { ok: true, message: "已按条件检索真实节点。", data: findCanvasAgentNodes(current, args as Parameters<typeof findCanvasAgentNodes>[1]) };
@@ -592,15 +668,16 @@ export function CanvasAssistantPanel({
 
     const executeOnlineToolCalls = async (sessionId: string, toolCalls: ResponseToolCall[]) => {
         const results: OnlineExecutedToolCall[] = [];
-        let stopped = false;
+        let stopReason = "";
         for (const toolCall of toolCalls) {
-            if (stopped) {
-                results.push({ toolCallId: toolCall.id, name: toolCall.function.name, result: { ok: false, message: "前一个工具调用失败，未继续执行。" } });
+            if (stopReason) {
+                results.push({ toolCallId: toolCall.id, name: toolCall.function.name, result: { ok: false, message: stopReason } });
                 continue;
             }
             const result = await executeOnlineToolCall(sessionId, toolCall);
             results.push(result);
-            if (!result.result.ok) stopped = true;
+            if (!result.result.ok) stopReason = "前一个工具调用失败，未继续执行。";
+            else if (result.result.waitForUser) stopReason = "已打开待确认面板，同批后续操作暂不执行。";
         }
         return results;
     };
@@ -642,7 +719,7 @@ export function CanvasAssistantPanel({
         const restored = onUndoOps();
         if (!restored) return;
         snapshotRef.current = restored;
-        if (activeSession) appendMessage(activeSession.id, { id: nanoid(), role: "tool", title: "已撤销 Agent 批次", text: "已恢复到本次写回前的画布状态", detail: { status: "completed", remainingUndoCount: Math.max(0, undoOpsCount - 1) } });
+        if (activeSession) appendMessage(activeSession.id, { id: nanoid(), role: "tool", title: "已撤销最近修改", text: "画布已恢复。已提交的生成任务和费用不受影响。", detail: { status: "completed", remainingUndoCount: Math.max(0, undoOpsCount - 1) } });
     };
 
     const submit = async () => {
@@ -658,72 +735,9 @@ export function CanvasAssistantPanel({
 
     useEffect(() => {
         if (!cinematicEntry) return;
-        setCinematicEntryActive(true);
         setView("chat");
-        setPrompt("");
         onCinematicEntryConsumed?.();
     }, [cinematicEntry, onCinematicEntryConsumed]);
-
-    const submitCinematicProject = async (text: string) => {
-        const value = text.trim();
-        if (!value || agentBusy) return;
-        const requestConfig = { ...effectiveConfig, model: effectiveConfig.textModel || effectiveConfig.model };
-        if (!isAiConfigReady(requestConfig, requestConfig.model)) {
-            navigateToSettings({ continueCreation: true });
-            return;
-        }
-        const session = activeSession || createSession();
-        if (!activeSession) {
-            setLocalSessions([session]);
-            setLocalActiveSessionId(session.id);
-        }
-        appendMessage(session.id, { id: nanoid(), role: "user", text: value });
-        setPrompt("");
-        setIsRunning(true);
-        let backendSessionId = "";
-        let continuationFailureDisposition: CinematicContinuationFailureDisposition | undefined;
-        try {
-            const cinematic = await runCinematicSession(session.id, value, snapshotRef.current, effectiveConfig, (createdId) => {
-                backendSessionId = createdId;
-            });
-            const applyContinuation = async ({ effectKey, signal }: { effectKey?: string; signal?: AbortSignal } = {}) => {
-                if (hasAgentGenerationEffect(session.id, effectKey)) return;
-                await canvasCinematicContinuationEntryAdapters["submit-cinematic"]({
-                    projectId,
-                    effectKey,
-                    signal,
-                    readSnapshot: () => snapshotRef.current,
-                    executeOps: async () => {
-                        const next = await onApplyOps(cinematic.ops);
-                        snapshotRef.current = next;
-                        return next;
-                    },
-                    completeSession: (key) => completeCinematicSession(session.id, cinematic.backendSessionId, cinematic.ops, false, key),
-                    readLiveSessionState: readCinematicSessionState,
-                    restoreLiveSessions: restoreCinematicSessions,
-                    restoreLiveSnapshot: restoreCinematicSnapshot,
-                    failProvider: (failure) => failCinematicSession(session.id, cinematic.backendSessionId, failure),
-                    onFailureDisposition: (disposition) => {
-                        continuationFailureDisposition = disposition;
-                    },
-                });
-                setCinematicEntryActive(false);
-            };
-            if (cinematic.continuationTask) {
-                await consumeGenerationTaskAgent(cinematic.continuationTask, cinematic.backendSessionId, applyContinuation, { signal: generationConsumerControllerRef.current.signal });
-            } else {
-                await applyContinuation();
-            }
-        } catch (error) {
-            if (continuationFailureDisposition) return;
-            handleCinematicContinuationFailure(error, (failure) => {
-                if (backendSessionId) failCinematicSession(session.id, backendSessionId, failure);
-                else appendMessage(session.id, { id: nanoid(), role: "error", title: "影视项目生成失败", text: failure instanceof Error ? failure.message : "影视项目生成失败" });
-            });
-        } finally {
-            setIsRunning(false);
-        }
-    };
 
     const resumePendingCinematicSession = async (sessionId: string, pending: CanvasAssistantPendingBackendSession) => {
         if (cinematicSessionControllersRef.current.has(pending.id)) return;
@@ -811,13 +825,29 @@ export function CanvasAssistantPanel({
                 <div ref={chatListRef} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
                     {messages.length ? (
                         <>
-                            {messages.map((message) => (
-                                <div key={message.id} className="space-y-2">
-                                    <AgentChatMessage item={assistantMessageToChatMessage(message)} theme={theme} user={user} isStreaming={agentBusy && message.id === messages.at(-1)?.id && message.role === "assistant"} onRejectTool={rejectOnlineTool} onApproveTool={approveOnlineTool} onQuickAction={submitQuickAction} />
+                            {messages.map((message, index) => (
+                                <Fragment key={message.id}>
+                                {agentBusy && index === messages.findLastIndex((item) => item.role === "user") + 1 ? <div className="creative-agent-thinking-wrap"><AgentWorkingMessage theme={theme} /></div> : null}
+                                <div className={message.role === "tool" ? "agent-tool-message" : "space-y-2"}>
+                                    <AgentChatMessage item={assistantMessageToChatMessage(message)} theme={theme} user={user} isStreaming={agentBusy && message.id === messages.at(-1)?.id && message.role === "assistant" && !canvasCreativeDetail(message)} onRejectTool={rejectOnlineTool} onApproveTool={approveOnlineTool} onQuickAction={submitQuickAction} />
+                                    {canvasCreativeDetail(message) && <CanvasCreativeInteraction
+                                        message={message} sessionId={activeSession!.id} active={message.id === activeCreativeId && !isRunning && agentMode === "online"} config={effectiveConfig}
+                                        superseded={message.id !== activeCreativeId}
+                                        canvas={{ canvasId: projectId, read: () => snapshotRef.current, apply: async (ops) => { const next = await onApplyOps(ops, { source: "online", conversationId: activeSession!.id, messageId: message.id }); snapshotRef.current = next; return next; } }}
+                                        onUpdate={(next) => upsertMessage(activeSession!.id, next)}
+                                        onContinue={(text) => { void sendMessage(text, localSessionsRef.current.find((session) => session.id === activeSession!.id)?.messages || []); }}
+                                        onReview={() => { void sendMessage("继续当前创作，在我已授权的范围内完成下一步。根据真实执行结果保留已完成作品，必要时自行读取素材；只有缺少关键信息或需要新的方案、费用确认时再停下来。", localSessionsRef.current.find((session) => session.id === activeSession!.id)?.messages || []); }}
+                                        onEditPrompt={(text) => {
+                                            setPrompt(text);
+                                            requestAnimationFrame(() => composerRef.current?.querySelector<HTMLElement>('textarea, [contenteditable="true"]')?.focus());
+                                        }}
+                                        onBusy={(id, busy) => setCreativeBusy((current) => current[id] === busy ? current : { ...current, [id]: busy })}
+                                    />}
                                     {message.references?.length ? <MessageReferences message={message} /> : null}
                                 </div>
+                                </Fragment>
                             ))}
-                            {agentBusy ? <AgentWorkingMessage theme={theme} /> : null}
+                            {agentBusy && messages.findLastIndex((item) => item.role === "user") === messages.length - 1 ? <div className="creative-agent-thinking-wrap"><AgentWorkingMessage theme={theme} /></div> : null}
                         </>
                     ) : (
                         <AgentChatEmptyState
@@ -835,8 +865,8 @@ export function CanvasAssistantPanel({
             {view === "chat" ? (
                 <>
                     {selectedReferences.length ? (
-                        <div className="thin-scrollbar flex max-w-full items-center gap-1.5 overflow-x-auto px-3 py-1.5">
-                            <span className="shrink-0 text-[var(--fs-micro)] font-medium opacity-55">参考 · {selectedReferences.length}</span>
+                        <div className="thin-scrollbar flex max-w-full items-center gap-1.5 overflow-x-auto px-3 pb-1" role="group" aria-label="待发送引用">
+                            <span className="shrink-0 text-xs text-muted-foreground">待发送引用</span>
                             {selectedReferences.map((item, index) => (
                                 <AssistantReferenceChip
                                     key={item.id}
@@ -859,28 +889,28 @@ export function CanvasAssistantPanel({
                             ))}
                         </div>
                     ) : null}
+                    {currentCreativeState && <div className="creative-agent-plan-docked" data-canvas-no-zoom data-canvas-wheel-scroll>
+                        <CreativePlanBar plan={creativePlan(currentCreativeState)} onLocateNode={(id) => onSelectNodeIds(new Set([id]))} />
+                    </div>}
+                    <div ref={composerRef}>
                     <AgentChatComposer
                         prompt={prompt}
                         sending={agentBusy}
-                        placeholder={cinematicEntryActive ? "一句话描述题材、角色和核心冲突" : "描述你想让 Agent 如何操作画布"}
+                        placeholder={currentCreativeState?.modificationRequested ? "在这里告诉我想改哪里，调整后再确认…" : "描述创作需求，或告诉我如何调整画布…"}
                         theme={theme}
                         references={composerReferences}
                         slashSkills={composerSkills}
                         onPromptChange={setPrompt}
-                        onSubmit={cinematicEntryActive ? () => submitCinematicProject(prompt) : submit}
+                        onSubmit={submit}
                         onAddFiles={addImagesToCanvas}
                         left={
                             <>
                                 <VoiceRecordingButton disabled={agentBusy} onTranscribed={(text) => setPrompt((prev) => (prev.trim() ? `${prev} ${text}` : text))} />
                                 <AgentTextModelPicker config={effectiveConfig} value={effectiveConfig.textModel} onChange={(model) => updateConfig("textModel", model)} />
-                                {cinematicEntryActive ? (
-                                    <span className="ml-2 inline-flex h-6 items-center rounded-md px-2 text-[var(--fs-tiny)] font-medium" style={{ background: theme.spatial.surface, color: theme.node.muted }}>
-                                        影视项目
-                                    </span>
-                                ) : null}
                             </>
                         }
                     />
+                    </div>
                 </>
             ) : null}
 

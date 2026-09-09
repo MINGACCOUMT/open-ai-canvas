@@ -48,6 +48,7 @@ type canvasTextOptions struct {
 }
 
 type agentToolRequests struct {
+	Canonical      *canonicalAgentRequest `json:"canonical,omitempty"`
 	Responses      map[string]interface{} `json:"responses"`
 	ChatCompletion map[string]interface{} `json:"chatCompletion"`
 	Claude         map[string]interface{} `json:"claude"`
@@ -421,6 +422,10 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		return runImageTask(ctx, input)
 	case "text":
 		if input.AgentRequests != nil {
+			input, err = resolveAgentResourcePlaceholders(input, true)
+			if err != nil {
+				return nil, err
+			}
 			return runAgentToolTask(ctx, input)
 		}
 		result, taskErr := runTextTask(ctx, input)
