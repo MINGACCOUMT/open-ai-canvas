@@ -380,6 +380,8 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                             onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
                             onMissingConfig={() => navigateToSettings({ continueCreation: true })}
                             onOpenChange={expanded ? undefined : onImageSettingsOpenChange}
+                            cameraControl={node.metadata?.cameraControl}
+                            onCameraControlChange={(options) => onConfigChange(node.id, { cameraControl: options })}
                         />
                     ) : mode === "video" ? (
                         <CanvasVideoSettingsPopover
