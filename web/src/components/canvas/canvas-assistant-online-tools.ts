@@ -12,7 +12,7 @@ import { buildOrderedCanvasResourceReferences, canvasResourceMentionToken } from
 import { buildCanvasWorkflowOps, looksLikeWorkflowRequest, type CanvasWorkflowInput } from "@/lib/canvas/canvas-agent-workflow";
 import type { Skill } from "@/services/api/skills";
 
-export type OnlineToolResult = { ok: true; message: string; data?: unknown } | { ok: false; message: string };
+export type OnlineToolResult = { ok: true; message: string; data?: unknown; waitForUser?: boolean } | { ok: false; message: string };
 
 export function objectDetail(value: unknown) {
     return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -228,6 +228,14 @@ export async function requestOnlineAgentModel(config: AiConfig, messages: Respon
 
 export function summarizeToolCalls(calls: ResponseToolCall[]) {
     return calls.map((call) => toolCallLabel(call.function.name)).join("，") || "工具调用";
+}
+
+/** 返回待确认工具批次的用户可读类别，避免主交互流程重复猜测工具语义。 */
+export function capabilityBatchTitle(calls: ResponseToolCall[]) {
+    const names = calls.map((call) => call.function.name);
+    if (names.some((name) => name.startsWith("canvas_") && (name.includes("skill") || name.includes("plugin")))) return "技能与插件";
+    if (names.some((name) => name.startsWith("canvas_"))) return "画布操作";
+    return "工具调用";
 }
 
 export function previewOnlineToolCalls(calls: ResponseToolCall[], snapshot: CanvasAgentSnapshot, config: AiConfig): CanvasAgentOperationImpact {

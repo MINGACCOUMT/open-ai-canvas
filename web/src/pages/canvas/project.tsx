@@ -26,7 +26,8 @@ import { flushCanvasStorePersistence } from "@/stores/canvas/use-canvas-store";
 import { ensureCanvasNodeAsset } from "@/services/project-asset-sync";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
-import { App, Button, Modal } from "antd";
+import { App, Button } from "antd";
+import { AppModal } from "@/components/ui/product/app-modal";
 import { getNodeSpec } from "@/constant/canvas";
 import { CanvasConfigComposer } from "@/components/canvas/canvas-config-composer";
 import { CanvasConfigNodePanel } from "@/components/canvas/canvas-config-node-panel";
@@ -48,6 +49,7 @@ import { CanvasVideoSegmentDialog } from "@/components/canvas/canvas-video-segme
 import { CanvasTimelineDialog } from "@/components/canvas/canvas-timeline-dialog";
 import { syncNodeSubtitlesToTimeline } from "@/lib/timeline/timeline-build";
 import { CanvasNodeAnglePanel } from "@/components/canvas/canvas-node-angle-dialog";
+import { CanvasNodeLightingPanel } from "@/components/canvas/canvas-node-lighting-dialog";
 import { CanvasTextEditorModal } from "@/components/canvas/canvas-text-editor-modal";
 import { CanvasNodeSearchModal } from "@/components/canvas/canvas-node-search-modal";
 import { CanvasStylePickerModal } from "@/components/canvas/canvas-style-picker-modal";
@@ -290,6 +292,8 @@ function InfiniteCanvasPage() {
     const [scriptEditorNodeId, setScriptEditorNodeId] = useState<string | null>(null);
     const [portraitClearanceNodeId, setPortraitClearanceNodeId] = useState<string | null>(null);
     const [artCritiqueNodeId, setArtCritiqueNodeId] = useState<string | null>(null);
+    const artCritiqueRunningRef = useRef(false);
+    const [artCritiqueStartRequest, setArtCritiqueStartRequest] = useState<{ nodeId: string; id: string; restart: boolean } | null>(null);
     const [scriptScrollTopById, setScriptScrollTopById] = useState<Record<string, number>>({});
     const [directorNodeId, setDirectorNodeId] = useState<string | null>(null);
     const [versionCompareRootId, setVersionCompareRootId] = useState<string | null>(null);
@@ -552,6 +556,21 @@ function InfiniteCanvasPage() {
         openAgent("local");
     }, [codexAutoConnect, codexCompactAgent, openAgent, projectLoaded, setAgentMode]);
 
+    useEffect(() => {
+        const sessionId = searchParams.get("conversation");
+        if (!projectLoaded || !sessionId) return;
+        if (!chatSessions.some((session) => session.id === sessionId)) {
+            message.warning("未找到要接续的会话，请从首页重新进入。");
+        } else {
+            activeChatIdRef.current = sessionId;
+            setActiveChatId(sessionId);
+            openAgent("online");
+        }
+        const next = new URLSearchParams(searchParams);
+        next.delete("conversation");
+        setSearchParams(next, { replace: true });
+    }, [projectLoaded, chatSessions, searchParams, setSearchParams, openAgent, message]);
+
     // 沉浸专注进入时收起智能体与小地图、重置 Dock 唤出态；仅响应「进入」瞬间，避免关闭专注内主动唤出的面板。
     const prevFocusModeRef = useRef(focusMode);
     useEffect(() => {
@@ -766,6 +785,7 @@ function InfiniteCanvasPage() {
 
     const {
         angleNodeId,
+        lightingNodeId,
         emotionNodeId,
         annotationNodeId,
         createImageReversePromptNodes,
@@ -779,6 +799,7 @@ function InfiniteCanvasPage() {
         extractingVideoFramesNodeId,
         frameDialogNodeId,
         generateAngleNode,
+        generateLightingNode,
         generateEmotionNode,
         handleSegmentConfirm,
         maskEditImageNode,
@@ -793,6 +814,7 @@ function InfiniteCanvasPage() {
         setFrameDialogNodeId,
         setSegmentDialogNodeId,
         setAngleNodeId,
+        setLightingNodeId,
         setEmotionNodeId,
         setAnnotationNodeId,
         setCropNodeId,
@@ -845,6 +867,7 @@ function InfiniteCanvasPage() {
             setSplitNodeId(clearDeletedId);
             setUpscaleNodeId(clearDeletedId);
             setAngleNodeId(clearDeletedId);
+            setLightingNodeId(clearDeletedId);
             setEmotionNodeId(clearDeletedId);
             setSuperResolveNodeId(clearDeletedId);
             setPreviewNodeId(clearDeletedId);
@@ -862,7 +885,7 @@ function InfiniteCanvasPage() {
             }
             cleanupCanvasFiles({ projectId, nodes: nextNodes, chatSessions });
         },
-        [chatSessions, cleanupCanvasFiles, message, projectId, setAngleNodeId, setAnnotationNodeId, setArtCritiqueNodeId, setCropNodeId, setEmotionNodeId, setFrameDialogNodeId, setMaskEditNodeId, setSegmentDialogNodeId, setSplitNodeId, setUpscaleNodeId, setRunningNodeId],
+        [chatSessions, cleanupCanvasFiles, message, projectId, setAngleNodeId, setAnnotationNodeId, setArtCritiqueNodeId, setCropNodeId, setEmotionNodeId, setFrameDialogNodeId, setLightingNodeId, setMaskEditNodeId, setSegmentDialogNodeId, setSplitNodeId, setUpscaleNodeId, setRunningNodeId],
     );
 
     const {
@@ -1201,6 +1224,7 @@ function InfiniteCanvasPage() {
         activeScriptNode,
         activeStylePresetId,
         angleNode,
+        lightingNode,
         emotionNode,
         annotationNode,
         batchChildCountById,
@@ -1251,6 +1275,7 @@ function InfiniteCanvasPage() {
         upscaleNodeId,
         superResolveNodeId,
         angleNodeId,
+        lightingNodeId,
         emotionNodeId,
         previewNodeId,
         contextMenu,
@@ -1433,7 +1458,8 @@ function InfiniteCanvasPage() {
         focusSelection: fitCanvasSelection,
     });
 
-    const { selectCanvasStyle, styleApplying } = useCanvasStyleWorkflow({
+    const { selectCanvasStyle, applyCanvasStyleAsync, styleApplying } = useCanvasStyleWorkflow({
+        canvasId: projectId,
         domainProjectId: currentProject?.projectId,
         nodesRef,
         selectedNodeIdsRef,
@@ -1503,6 +1529,7 @@ function InfiniteCanvasPage() {
         setMaskEditNodeId(null);
         setAnnotationNodeId(null);
         setAngleNodeId(null);
+        setLightingNodeId(null);
         setEmotionNodeId(null);
         setPreviewNodeId(null);
         setRunningNodeId(null);
@@ -2131,6 +2158,7 @@ function InfiniteCanvasPage() {
                             onRedo={redoCanvas}
                             onShare={() => setShareModalOpen(true)}
                             agentOpen={assistantOpen}
+                            agentPanelWidth={assistantMounted ? assistantWidth : undefined}
                             compactAgentStatus={codexCompactAgent ? { connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity } : undefined}
                             onToggleAgent={() => (assistantOpen ? closeAgent() : openAgent())}
                             shortcutRequestNonce={shortcutRequestNonce}
@@ -2379,7 +2407,7 @@ function InfiniteCanvasPage() {
                         </div>
 
                         {assistantMounted ? (
-                            <AssistantPanelColumn width={assistantWidth} closing={assistantClosing} topInset={focusMode ? "0px" : "var(--canvas-topbar-offset)"} onWidthChange={setAssistantWidth}>
+                                    <AssistantPanelColumn width={assistantWidth} closing={assistantClosing} topInset="0px" onWidthChange={setAssistantWidth}>
                                 {(resizing) => (
                                     <CanvasAssistantPanel
                                         nodes={nodes}
@@ -2391,6 +2419,13 @@ function InfiniteCanvasPage() {
                                         onSelectNodeIds={setSelectedNodeIds}
                                         onSessionsChange={handleAssistantSessionsChange}
                                         onApplyOps={applyAgentOps}
+                                        onApplyStyle={applyCanvasStyleAsync}
+                                        onGenerateStoryboard={generateScriptRows}
+                                        onStartArtCritique={(nodeId, restart) => {
+                                            if (artCritiqueRunningRef.current) throw new Error("已有审美分析正在进行，请先完成或停止当前分析");
+                                            setArtCritiqueStartRequest({ nodeId, id: nanoid(), restart });
+                                            setArtCritiqueNodeId(nodeId);
+                                        }}
                                         canUndoOps={canUndoAgentOps}
                                         undoOpsCount={agentUndoCount}
                                         onUndoOps={undoAgentOps}
@@ -2410,13 +2445,13 @@ function InfiniteCanvasPage() {
                     </div>
 
                     {angleNode?.metadata?.content ? (
-                        <Modal
+                        <AppModal
+                            flush
                             open
                             centered
                             title="多角度编辑器"
                             footer={null}
                             width={620}
-                            destroyOnHidden
                             onCancel={() => setAngleNodeId(null)}
                         >
                             <CanvasNodeAnglePanel
@@ -2426,7 +2461,27 @@ function InfiniteCanvasPage() {
                                     void generateAngleNode(angleNode, params);
                                 }}
                             />
-                        </Modal>
+                        </AppModal>
+                    ) : null}
+
+                    {lightingNode?.metadata?.content ? (
+                        <AppModal
+                            flush
+                            open
+                            centered
+                            title="打光效果"
+                            footer={null}
+                            width={900}
+                            onCancel={() => setLightingNodeId(null)}
+                        >
+                            <CanvasNodeLightingPanel
+                                dataUrl={lightingNode.metadata.content}
+                                onClose={() => setLightingNodeId(null)}
+                                onConfirm={(options, prompt) => {
+                                    void generateLightingNode(lightingNode, options, prompt);
+                                }}
+                            />
+                        </AppModal>
                     ) : null}
 
                     {emotionNode?.metadata?.content && !isCanvasNodeMoving ? (
@@ -2529,6 +2584,10 @@ function InfiniteCanvasPage() {
                         onAngle={(node) => {
                             setDialogNodeId(null);
                             setAngleNodeId((current) => (current === node.id ? null : node.id));
+                        }}
+                        onLighting={(node) => {
+                            setDialogNodeId(null);
+                            setLightingNodeId((current) => (current === node.id ? null : node.id));
                         }}
                         onViewImage={(node) => setPreviewNodeId(node.id)}
                         onExtractVideoFrames={openVideoFrameExtractor}
@@ -2759,6 +2818,9 @@ function InfiniteCanvasPage() {
                         />
 
                         <AiArtCritiqueModal
+                            startRequestId={artCritiqueStartRequest && artCritiqueStartRequest.nodeId === artCritiqueNode?.id ? artCritiqueStartRequest.id : undefined}
+                            restartRequested={artCritiqueStartRequest?.nodeId === artCritiqueNode?.id && artCritiqueStartRequest?.restart}
+                            onRunningChange={(running) => { artCritiqueRunningRef.current = running; }}
                             node={artCritiqueNode}
                             upstreamNodes={artCritiqueInputs}
                             open={Boolean(artCritiqueNode)}

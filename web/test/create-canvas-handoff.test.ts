@@ -357,14 +357,15 @@ test("creation result handoff falls back by stable result order only for a compl
 
 test("Create forwards owned result assets through one new canvas and the project persists before clearing the handoff", () => {
     const workspace = readFileSync(resolve(import.meta.dir, "../src/pages/create/creation-workspace.tsx"), "utf8");
+    const createPage = readFileSync(resolve(import.meta.dir, "../src/pages/create/index.tsx"), "utf8");
     const canvasIndex = readFileSync(resolve(import.meta.dir, "../src/pages/canvas/index.tsx"), "utf8");
     const canvasProject = readFileSync(resolve(import.meta.dir, "../src/pages/canvas/project.tsx"), "utf8");
 
-    expect(workspace).toContain('import { creationCanvasHandoffPath, creationResultAssetIds } from "@/lib/canvas/canvas-asset-handoff"');
-    expect(workspace).toContain("const resultAssetIds = resultUrls.length ? creationResultAssetIds(assets, { messageId: item.id, taskIds: item.taskIds || [], resultUrls }) : [];");
-    expect(workspace).toContain("const canvasHandoffPath = creationCanvasHandoffPath(resultAssetIds, resultUrls.length);");
-    expect(workspace).toContain('const canvasPath = canvasHandoffPath || "/canvas";');
-    expect(workspace).toContain('<Link to={canvasPath}>{canvasHandoffPath ? "添加到画布" : "打开画布"}</Link>');
+    expect(workspace).toContain("onContinueCanvas(resultAssetIds)");
+    expect(createPage).toContain("continueCreationConversationOnCanvas(source)");
+    expect(createPage).toContain("if (ids.length !== item.resultUrls.length) throw new Error");
+    expect(createPage).toContain("await saveCreationConversations(next)");
+    expect(createPage.indexOf("await saveCreationConversations(next)")).toBeLessThan(createPage.indexOf("navigate(`/canvas/${result.id}?${params.toString()}`)"));
     expect(canvasIndex).toContain('const handoffMode = mode === "handoff"');
     expect(canvasIndex).toContain('mode !== "new" && mode !== "recent" && mode !== "handoff"');
     expect(canvasProject).toContain('import { canvasAssetHandoffAttempt, finalizeCanvasAssetHandoff, uninsertedCanvasAssetHandoffPayloads } from "@/lib/canvas/canvas-asset-handoff"');
