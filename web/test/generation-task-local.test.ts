@@ -1387,7 +1387,8 @@ test("remote provider keeps Create resolution semantics and still creates one Ba
         },
     );
 
-    expect(backendInput?.input.config).toMatchObject({ vquality: "720", quality: "auto" });
+    expect(backendInput?.input.config).toMatchObject({ vquality: "720" });
+    expect(backendInput?.input.config.quality).toBeUndefined();
     expect(localCalls).toBe(0);
 });
 

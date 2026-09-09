@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Camera, Settings2 } from "lucide-react";
-import { Button, Modal } from "antd";
+import { Button } from "antd";
 
 import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
 import { CanvasNodeCameraPanel } from "@/components/canvas/canvas-node-camera-dialog";
+import { AppModal } from "@/components/ui/product/app-modal/app-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { modelCapabilityConfigFor, normalizeImageValue } from "@/lib/model-capabilities";
 import type { CameraControlOptions } from "@/lib/canvas/camera-prompt-library";
@@ -103,7 +104,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
             )}
             {panel}
             {cameraOpen && onCameraControlChange && (
-                <Modal title="摄像机控制" open centered footer={null} width={780} destroyOnHidden onCancel={() => setCameraOpen(false)} styles={{ body: { padding: 0 } }}>
+                <AppModal title="摄像机控制" open centered footer={null} width={780} flush onCancel={() => setCameraOpen(false)}>
                     <CanvasNodeCameraPanel
                         cameraControl={cameraControl}
                         onClose={() => setCameraOpen(false)}
@@ -112,7 +113,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
                             setCameraOpen(false);
                         }}
                     />
-                </Modal>
+                </AppModal>
             )}
         </>
     );
