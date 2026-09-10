@@ -2519,7 +2519,7 @@ func runProtocolAdapterTask(ctx context.Context, input canvasGenerationInput, ad
 				created = recovered
 				break
 			}
-			if attempt == 2 || !retryableUpstreamStatusError(createErr) {
+			if attempt == 2 || !retryableUpstreamRequestError(createErr) {
 				return nil, createErr
 			}
 			if waitErr := sleepContext(ctx, time.Duration(attempt+1)*1500*time.Millisecond); waitErr != nil {
@@ -5125,13 +5125,15 @@ func postJSON(ctx context.Context, config providerConfig, path string, body inte
 }
 
 // postJSONWithTransientRetry 针对聚合网关偶发瞬时 5xx（GROK 踩坑笔记第五节：
-// "Upstream service temporarily unavailable"）的创建请求重试：短退避 1.5s→3s，
-// 最多 3 次尝试；4xx 客户端错误立即失败，避免浪费上游配额重复同样的拒收。
+// "Upstream service temporarily unavailable"）与路径抖动网络错误（连接池闲置回收后
+// 重新拨号撞上坏窗口：Clash 节点切换、GFW RST、路由抖动；POST 不会被 net/http
+// 自动重试）的创建请求重试：短退避 1.5s→3s，最多 3 次尝试；4xx 客户端错误立即
+// 失败，避免浪费上游配额重复同样的拒收。
 func postJSONWithTransientRetry(ctx context.Context, config providerConfig, path string, body interface{}, target interface{}) error {
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
 		err = postJSON(ctx, config, path, body, target)
-		if err == nil || attempt == 2 || !retryableUpstreamStatusError(err) {
+		if err == nil || attempt == 2 || !retryableUpstreamRequestError(err) {
 			break
 		}
 		delay := time.Duration(attempt+1) * 1500 * time.Millisecond
@@ -5144,6 +5146,30 @@ func postJSONWithTransientRetry(ctx context.Context, config providerConfig, path
 		}
 	}
 	return err
+}
+
+// retryableUpstreamRequestError 瞬时 5xx 或瞬时网络错误，值得短退避重试。
+func retryableUpstreamRequestError(err error) bool {
+	return retryableUpstreamStatusError(err) || retryableUpstreamNetworkError(err)
+}
+
+// retryableUpstreamNetworkError 判定新连接/在途连接被静默断开的瞬时网络错误。
+// 任务取消与整体超时（DeadlineExceeded）不算瞬时——重试只会重复等死。
+func retryableUpstreamNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"tls handshake timeout", "connection reset", "unexpected eof", "broken pipe", "\"eof\"", ": eof"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func retryableUpstreamStatusError(err error) bool {
