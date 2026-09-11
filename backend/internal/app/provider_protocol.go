@@ -76,13 +76,44 @@ func runProtocolAdapterTaskWithTiming(ctx context.Context, input canvasGeneratio
 		if err != nil {
 			return nil, err
 		}
-		body, err := executeProtocolRequest(withProviderRequestKind(ctx, "create"), input.Config, spec)
-		if err != nil {
-			return nil, err
+		// 聚合网关偶发用 5xx 状态码包裹两类 body（GROK 踩坑笔记第五节 + 2026-09-08 实测）：
+		// ① 已完成的业务体（status done + 媒体 URL，上游已计费）——解析复用，禁止重提交；
+		// ② 真正的瞬时错误体（{"error":{...}}，未生成未扣费）——短退避重试 create。
+		// 同步图片类插件对缺失 status 的 body 默认映射成完成态，因此恢复守卫必须
+		// 同时要求任务 ID 或真实媒体输出，否则错误体会被误判成「已完成但无结果」。
+		// 连接池闲置回收后的重新拨号还会间歇性撞上网络坏窗口（EOF/reset），一并重试。
+		recoveredFromTransient := false
+		var body []byte
+		for createAttempt := 0; ; createAttempt++ {
+			body, err = executeProtocolRequest(withProviderRequestKind(ctx, "create"), input.Config, spec)
+			if err == nil {
+				break
+			}
+			if recovered, ok := recoverProtocolCreateFromTransientError(ctx, adapter, input.Mode, err); ok {
+				// 完成态恢复直接取结果（taskID 可能为空，不能再回头解析错误体）；
+				// pending 态恢复（拿到任务 ID）继续走正常轮询。
+				if recovered.Status == protocol.StatusSucceeded {
+					return finishProtocolAdapterResult(ctx, input, adapter, request, recovered.TaskID, recovered.Result)
+				}
+				created = recovered
+				recoveredFromTransient = true
+				break
+			}
+			if createAttempt == 2 || !retryableUpstreamRequestError(err) {
+				return nil, err
+			}
+			if waitErr := sleepContext(ctx, time.Duration(createAttempt+1)*1500*time.Millisecond); waitErr != nil {
+				return nil, err
+			}
 		}
-		created, err = adapter.ParseCreate(ctx, body)
-		if err != nil {
-			return nil, err
+		if !recoveredFromTransient {
+			if err != nil {
+				return nil, err
+			}
+			created, err = adapter.ParseCreate(ctx, body)
+			if err != nil {
+				return nil, err
+			}
 		}
 		taskID = created.TaskID
 		if taskID == "" {
@@ -859,7 +890,19 @@ func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInpu
 	if err != nil {
 		return nil, err
 	}
-	data, mimeType, err := executeProtocolBinaryRequest(withProviderRequestKind(ctx, "download"), input.Config, spec)
+	// 结果下载与媒体下载共用瞬时错误重试：聚合网关偶发 5xx 与网络坏窗口（EOF/reset）
+	// 不应判死整条任务。
+	var data []byte
+	var mimeType string
+	for attempt := 0; attempt < 3; attempt++ {
+		data, mimeType, err = executeProtocolBinaryRequest(withProviderRequestKind(ctx, "download"), input.Config, spec)
+		if err == nil || attempt == 2 || !retryableUpstreamRequestError(err) {
+			break
+		}
+		if waitErr := sleepContext(ctx, time.Duration(attempt+1)*time.Second); waitErr != nil {
+			return nil, fmt.Errorf("声明式协议结果下载失败：%w", waitErr)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("声明式协议结果下载失败：%w", err)
 	}
@@ -930,7 +973,75 @@ func protocolMediaBytes(ctx context.Context, config providerConfig, reference pr
 	return nil, "", fmt.Errorf("声明式协议媒体结果下载失败：%w", err)
 }
 
+// retryableUpstreamRequestError 瞬时 5xx 或瞬时网络错误，值得短退避重试。
+func retryableUpstreamRequestError(err error) bool {
+	return retryableUpstreamStatusError(err) || retryableUpstreamNetworkError(err)
+}
+
+func retryableUpstreamStatusError(err error) bool {
+	var httpErr providerHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 524:
+		return true
+	default:
+		return false
+	}
+}
+
+// retryableUpstreamNetworkError 判定新连接/在途连接被静默断开的瞬时网络错误。
+// 连接池闲置回收后重新拨号会间歇性撞上网络坏窗口（Clash 节点切换、GFW RST、
+// 路由抖动）；net/http 对 POST 不做自动重试，必须在应用层补。
+// 任务取消与整体超时（DeadlineExceeded）不算瞬时——重试只会重复等死。
+func retryableUpstreamNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"tls handshake timeout", "connection reset", "unexpected eof", "broken pipe", "\"eof\"", ": eof"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// recoverProtocolCreateFromTransientError 尝试把上游瞬时 5xx 响应体按声明式创建
+// 响应解析。只有「可续轮询（有任务 ID）」或「真完成（完成态且带该模式的媒体输出）」
+// 才返回 ok；错误体（无任务 ID、无输出）一律走原始错误路径，由调用方重试。
+// 场景：网关用 502 状态码包裹已完成业务体（已扣费），按状态码丢弃等于让用户白付钱。
+func recoverProtocolCreateFromTransientError(ctx context.Context, adapter protocol.Adapter, mode string, requestErr error) (protocol.CreateResult, bool) {
+	var httpErr providerHTTPError
+	if !errors.As(requestErr, &httpErr) || !retryableUpstreamStatusError(requestErr) {
+		return protocol.CreateResult{}, false
+	}
+	body := []byte(strings.TrimSpace(httpErr.Body))
+	if len(body) == 0 || !json.Valid(body) {
+		return protocol.CreateResult{}, false
+	}
+	created, err := adapter.ParseCreate(ctx, body)
+	if err != nil {
+		return protocol.CreateResult{}, false
+	}
+	if strings.TrimSpace(created.TaskID) != "" {
+		return created, true
+	}
+	if created.Status == protocol.StatusSucceeded && protocolResultHasOutput(mode, created.Result) {
+		return created, true
+	}
+	return protocol.CreateResult{}, false
+}
+
 func retryableProtocolMediaDownload(err error) bool {
+	if retryableUpstreamRequestError(err) {
+		return true
+	}
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

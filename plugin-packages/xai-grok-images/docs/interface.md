@@ -275,7 +275,7 @@
                 {
                   "$ref": "request.providerOptions.grok-image.response_format"
                 },
-                "url"
+                "b64_json"
               ]
             },
             "aspect_ratio": {

@@ -641,3 +641,166 @@ func testPluginPackage(t *testing.T, manifest []byte) []byte {
 	}
 	return buffer.Bytes()
 }
+
+// 网关实测（2026-09-08 xAI 视频）：POST 保持 65s 后返回 HTTP 502，但响应体是
+// 已完成的生成结果（已扣费）。按状态码丢弃等于让用户白付钱；重提交又会二次计费。
+// 正确行为：把 5xx 错误体按创建响应解析，能拿到任务 ID 或带输出的完成态就复用。
+func TestDeclarativeProtocolCreateRecoversCompletedResultFromUpstream5xx(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-5xx-recovery","version":"1.0.0","name":"Test 5xx Recovery","author":"Test","documentation":"# Test 5xx Recovery",
+		"contributes":{"providers":[{"id":"test-declarative-5xx-recovery","label":"Test 5xx Recovery","capabilities":["video"],"scopes":["canvas"],"create":{"method":"POST","path":"/tasks","body":{"model":{"$ref":"request.model"}}},"poll":{"method":"GET","path":"/videos/{{taskId}}"},"result":{"method":"GET","path":"/videos/{{taskId}}/content"},"response":{"taskId":{"$coalesce":[{"$ref":"response.id"},{"$ref":"taskId"}]},"status":{"$coalesce":[{"$ref":"response.status"},"pending"]}}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-5xx-recovery.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	createCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tasks":
+			createCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"id":"recovered-task","status":"completed"}`))
+		case "/v1/videos/recovered-task/content":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-5xx-recovery", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "video", Prompt: "a clip", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want completed body recovered from 502", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("create calls = %d, want 1 (must not resubmit a billed generation)", createCalls)
+	}
+	if result["mode"] != "video" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// 网关瞬时 502 的错误体（{"error":{...}}）不能被同步插件默认完成态误判成
+// 「已完成但无结果」：守卫要求任务 ID 或真实媒体输出，都没有则按瞬时错误重试。
+func TestDeclarativeProtocolCreateRetriesGenuineTransient5xxErrorBody(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-5xx-error-retry","version":"1.0.0","name":"Test 5xx Error Retry","author":"Test","documentation":"# Test 5xx Error Retry",
+		"contributes":{"providers":[{"id":"test-declarative-5xx-error-retry","label":"Test 5xx Error Retry","capabilities":["image"],"scopes":["canvas"],"create":{"method":"POST","path":"/images/generations","body":{"model":{"$ref":"request.model"},"prompt":{"$ref":"request.prompt"}}},"response":{"status":"succeeded","images":{"$map":{"from":{"$ref":"response.data"},"as":"item","in":{"url":{"$ref":"item.url"}}}},"errorPaths":["error.code"],"messagePaths":["error.message"]}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-5xx-error-retry.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	createCalls := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/generations":
+			createCalls++
+			if createCalls == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"error":{"message":"Upstream service temporarily unavailable","type":"upstream_error"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"url":"` + server.URL + `/out.png"}]}`))
+		case "/out.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("image"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-5xx-error-retry", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "image", Prompt: "a cat", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want transient error body retried", err)
+	}
+	if createCalls != 2 {
+		t.Fatalf("create calls = %d, want 2 (error body must not be treated as completed)", createCalls)
+	}
+	if result["mode"] != "image" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// 新连接直接被断（EOF，无响应体）——连接池闲置回收后重新拨号撞上网络坏窗口的
+// 实测形态（POST 不会被 net/http 自动重试）——声明式 create 应短退避重试。
+func TestDeclarativeProtocolCreateRetriesFreshConnectionNetworkError(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-network-retry","version":"1.0.0","name":"Test Network Retry","author":"Test","documentation":"# Test Network Retry",
+		"contributes":{"providers":[{"id":"test-declarative-network-retry","label":"Test Network Retry","capabilities":["image"],"scopes":["canvas"],"create":{"method":"POST","path":"/images/generations","body":{"model":{"$ref":"request.model"},"prompt":{"$ref":"request.prompt"}}},"response":{"status":"succeeded","images":{"$map":{"from":{"$ref":"response.data"},"as":"item","in":{"url":{"$ref":"item.url"}}}},"errorPaths":["error.code"],"messagePaths":["error.message"]}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-network-retry.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	createCalls := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/generations":
+			createCalls++
+			if createCalls == 1 {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatal("server does not support hijacking")
+				}
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = conn.Close()
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"url":"` + server.URL + `/out.png"}]}`))
+		case "/out.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("image"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-network-retry", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "image", Prompt: "a cat", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want EOF retried", err)
+	}
+	if createCalls != 2 {
+		t.Fatalf("create calls = %d, want 2 (EOF must be retried)", createCalls)
+	}
+	if result["mode"] != "image" {
+		t.Fatalf("result = %#v", result)
+	}
+}

@@ -1754,7 +1754,7 @@ func TestRunVideoTaskUsesXAIVideoGenerationEndpoint(t *testing.T) {
 			if body["model"] != "grok-imagine-video-1.5" || body["prompt"] != "make it move" {
 				t.Errorf("request body = %#v", body)
 			}
-			if body["duration"] != float64(10) || body["aspect_ratio"] != "1:1" || body["resolution"] != "720p" {
+			if body["duration"] != float64(10) || body["aspect_ratio"] != "1:1" || body["resolution"] != "1k" {
 				t.Errorf("xAI settings = %#v", body)
 			}
 			for _, legacyField := range []string{"seconds", "size", "images"} {
@@ -1852,7 +1852,7 @@ func TestXAIVideoPluginMapsUnmarkedImagesToStartFrame(t *testing.T) {
 		},
 		Metadata: map[string]interface{}{"videoEditOperation": "image_to_video"},
 	})
-	if body["duration"] != float64(20) || body["aspect_ratio"] != "9:16" || body["resolution"] != "1080p" {
+	if body["duration"] != float64(20) || body["aspect_ratio"] != "9:16" || body["resolution"] != "2k" {
 		t.Fatalf("xAI settings = %#v", body)
 	}
 	image, _ := body["image"].(map[string]any)

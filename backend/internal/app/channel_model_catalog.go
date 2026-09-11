@@ -1,6 +1,7 @@
 package app
 
 import (
+	"time"
 	"context"
 	"encoding/json"
 	"errors"
@@ -149,7 +150,19 @@ func (s *Service) FetchChannelModelCatalog(ctx context.Context, actor *model.Use
 	ApplyOutboundHeaders(request, headers)
 
 	// 只代理固定的模型目录 GET；用户密钥仅用于本次请求，不写入数据库或日志。
-	data, _, err := doBinary(request)
+	// 模型列表是幂等 GET：路径抖动（新连接 EOF/reset，常见于连接池闲置回收后的
+	// 重新拨号撞上网络坏窗口）直接短退避重试，避免配置页间歇性「无法连接」。
+	var data []byte
+	for attempt := 0; attempt < 3; attempt++ {
+		fetchRequest := request.Clone(requestContext)
+		data, _, err = doBinary(fetchRequest)
+		if err == nil || attempt == 2 || !retryableUpstreamRequestError(err) {
+			break
+		}
+		if waitErr := sleepContext(requestContext, time.Duration(attempt+1)*800*time.Millisecond); waitErr != nil {
+			return nil, channelModelsUpstreamError(err)
+		}
+	}
 	if err != nil {
 		return nil, channelModelsUpstreamError(err)
 	}
