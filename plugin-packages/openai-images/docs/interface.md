@@ -257,24 +257,86 @@
             },
             "size": {
               "$omitEmpty": {
-                "$if": {
-                  "condition": {
-                    "$in": [
-                      {
-                        "$lower": {
-                          "$trim": {
-                            "$ref": "request.aspectRatio"
-                          }
-                        }
+                "$switch": {
+                  "cases": [
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.aspectRatio"
+                              }
+                            }
+                          },
+                          [
+                            "",
+                            "auto"
+                          ]
+                        ]
                       },
-                      [
-                        "",
-                        "auto"
-                      ]
-                    ]
-                  },
-                  "then": null,
-                  "else": {
+                      "then": null
+                    },
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.aspectRatio"
+                              }
+                            }
+                          },
+                          [
+                            "1:1"
+                          ]
+                        ]
+                      },
+                      "then": "1024x1024"
+                    },
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.aspectRatio"
+                              }
+                            }
+                          },
+                          [
+                            "3:2",
+                            "4:3",
+                            "16:9",
+                            "21:9",
+                            "2:1"
+                          ]
+                        ]
+                      },
+                      "then": "1536x1024"
+                    },
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.aspectRatio"
+                              }
+                            }
+                          },
+                          [
+                            "2:3",
+                            "3:4",
+                            "9:16",
+                            "1:2"
+                          ]
+                        ]
+                      },
+                      "then": "1024x1536"
+                    }
+                  ],
+                  "default": {
                     "$ref": "request.aspectRatio"
                   }
                 }
