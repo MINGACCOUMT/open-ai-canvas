@@ -29,6 +29,12 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 		if declared := videoResolutionNameRequest(input.VideoCapability, resolution); declared != "" {
 			resolution = declared
 		}
+		// xai-video 的插件模板把 request.resolution 原样透传给上游，而上游视频
+		// 端点枚举只有 480p/720p/1080p（1k/2k/纯数字都会被 serde 拒收）；渠道
+		// 能力声明可能带着旧档位，必须在这里强制收敛。
+		if strings.TrimSpace(input.Config.InterfaceType) == string(model.ChannelInterfaceXAIVideo) {
+			resolution = normalizeXAIVideoResolutionTier(resolution)
+		}
 	}
 	aspectRatio := input.Config.Size
 	if input.Mode == "image" && strings.TrimSpace(input.Config.InterfaceType) == string(model.ChannelInterfaceOpenAIImage) {
@@ -365,4 +371,18 @@ func safeProtocolFilename(value string) string {
 		return "upload.bin"
 	}
 	return value
+}
+
+// normalizeXAIVideoResolutionTier 把任意分辨率档位收敛到 xAI 视频端点的
+// 合法枚举 480p/720p/1080p（实测发 1k/2k 或纯数字都会 422：
+// unknown variant, expected one of `480p`,`720p`,`1080p`）。
+func normalizeXAIVideoResolutionTier(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "480", "480p", "low":
+		return "480p"
+	case "1080", "1080p", "1440", "1440p", "2k", "2160", "2160p", "4k", "high":
+		return "1080p"
+	default:
+		return "720p"
+	}
 }

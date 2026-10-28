@@ -452,6 +452,9 @@
                 "$ref": "response.id"
               },
               {
+                "$ref": "response.request_id"
+              },
+              {
                 "$ref": "response.task_id"
               },
               {
