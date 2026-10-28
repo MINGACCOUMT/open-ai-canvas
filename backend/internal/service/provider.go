@@ -1773,7 +1773,7 @@ func runGrokImageTask(ctx context.Context, input canvasGenerationInput) (map[str
 		return nil, err
 	}
 	var payload imageResponse
-	if err := postJSON(ctx, input.Config, path, body, &payload); err != nil {
+	if err := postJSONWithTransientRetry(ctx, input.Config, path, body, &payload); err != nil {
 		return nil, err
 	}
 	images, err := imageDataURLs(payload)
@@ -1788,10 +1788,12 @@ func grokImageRequestBody(input canvasGenerationInput) (grokImageRequest, string
 		return grokImageRequest{}, "", errors.New("Grok 图片协议不支持蒙版编辑，请移除蒙版后重试")
 	}
 	body := grokImageRequest{
-		Model:          input.Config.Model,
-		Prompt:         withSystemPrompt(input.Config, input.Prompt),
-		N:              1,
-		ResponseFormat: "url",
+		Model:   input.Config.Model,
+		Prompt:  withSystemPrompt(input.Config, input.Prompt),
+		N:       1,
+		ResponseFormat: "b64_json",
+		// 部署服务器常直连不到 xAI 官方 CDN（imgen.x.ai），url 形态的结果需要后端
+		// 再下载必然超时；b64_json 让图片内嵌响应返回，彻底去掉外网下载依赖。
 		// Grok 图片协议用 aspect_ratio 表达画布比例；同时发送 size 会被上游按 OpenAI 枚举校验并拒绝。
 		AspectRatio: normalizeGrokImageAspectRatio(input.Config.Size),
 		Resolution:  normalizeGrokImageResolution(input.Config.Quality),
@@ -1908,7 +1910,7 @@ func runXAIImageTask(ctx context.Context, input canvasGenerationInput) (map[stri
 		return nil, err
 	}
 	var payload imageResponse
-	if err := postJSON(ctx, input.Config, body.path, body.fields, &payload); err != nil {
+	if err := postJSONWithTransientRetry(ctx, input.Config, body.path, body.fields, &payload); err != nil {
 		return nil, err
 	}
 	images, err := imageDataURLs(payload)
@@ -2464,6 +2466,32 @@ func runDeclarativeProtocolTask(ctx context.Context, input canvasGenerationInput
 	return runProtocolAdapterTask(ctx, input, adapter)
 }
 
+// recoverProtocolCreateFromUpstream5xx 尝试把上游 5xx 响应体按声明式创建响应解析。
+// 只有瞬时状态码（502/503/504/524）且解析结果「可续轮询（有任务 ID）」或「真完成
+// （完成态且带该模式的媒体输出）」才返回 ok；错误体（无任务 ID、无输出）一律走
+// 原始错误路径，由调用方按瞬时错误重试。
+func recoverProtocolCreateFromUpstream5xx(ctx context.Context, adapter protocol.Adapter, mode string, requestErr error) (protocol.CreateResult, bool) {
+	var httpErr providerHTTPError
+	if !errors.As(requestErr, &httpErr) || !retryableUpstreamStatusError(requestErr) {
+		return protocol.CreateResult{}, false
+	}
+	body := []byte(strings.TrimSpace(httpErr.Body))
+	if len(body) == 0 || !json.Valid(body) {
+		return protocol.CreateResult{}, false
+	}
+	created, err := adapter.ParseCreate(ctx, body)
+	if err != nil {
+		return protocol.CreateResult{}, false
+	}
+	if strings.TrimSpace(created.TaskID) != "" {
+		return created, true
+	}
+	if created.Status == protocol.StatusSucceeded && protocolResultHasOutput(mode, created.Result) {
+		return created, true
+	}
+	return protocol.CreateResult{}, false
+}
+
 func runProtocolAdapterTask(ctx context.Context, input canvasGenerationInput, adapter protocol.Adapter) (map[string]interface{}, error) {
 	request := protocolRequestFromInput(input)
 	taskID := resumedProviderRequestID(ctx)
@@ -2473,13 +2501,30 @@ func runProtocolAdapterTask(ctx context.Context, input canvasGenerationInput, ad
 		if err != nil {
 			return nil, err
 		}
-		body, err := executeProtocolRequest(withProviderRequestKind(ctx, "create"), input.Config, spec)
-		if err != nil {
-			return nil, err
-		}
-		created, err = adapter.ParseCreate(ctx, body)
-		if err != nil {
-			return nil, err
+		// 聚合网关偶发用 5xx 状态码包裹两类 body（踩坑笔记第五节 + 2026-09-08 实测）：
+		// ① 已完成的业务体（status done + 媒体 URL，上游已计费）——解析复用，禁止重提交；
+		// ② 真正的瞬时错误体（{"error":{...}}，未生成未扣费）——短退避重试 create。
+		// 同步图片类插件对缺失 status 的 body 默认映射成完成态，因此恢复守卫必须
+		// 同时要求任务 ID 或真实媒体输出，否则错误体会被误判成「已完成但无结果」。
+		for attempt := 0; ; attempt++ {
+			body, createErr := executeProtocolRequest(withProviderRequestKind(ctx, "create"), input.Config, spec)
+			if createErr == nil {
+				created, err = adapter.ParseCreate(ctx, body)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+			if recovered, ok := recoverProtocolCreateFromUpstream5xx(ctx, adapter, input.Mode, createErr); ok {
+				created = recovered
+				break
+			}
+			if attempt == 2 || !retryableUpstreamRequestError(createErr) {
+				return nil, createErr
+			}
+			if waitErr := sleepContext(ctx, time.Duration(attempt+1)*1500*time.Millisecond); waitErr != nil {
+				return nil, createErr
+			}
 		}
 		taskID = created.TaskID
 		if created.Status == protocol.StatusFailed || created.Status == protocol.StatusCancelled {
@@ -3190,7 +3235,18 @@ func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInpu
 	if err != nil {
 		return nil, err
 	}
-	data, mimeType, err := executeProtocolBinaryRequest(withProviderRequestKind(ctx, "download"), input.Config, spec)
+	// 结果下载与媒体下载共用瞬时错误重试：聚合网关偶发 5xx 抖动不应判死整条任务。
+	var data []byte
+	var mimeType string
+	for attempt := 0; attempt < 3; attempt++ {
+		data, mimeType, err = executeProtocolBinaryRequest(withProviderRequestKind(ctx, "download"), input.Config, spec)
+		if err == nil || attempt == 2 || !retryableProtocolMediaDownload(err) {
+			break
+		}
+		if waitErr := sleepContext(ctx, time.Duration(attempt+1)*time.Second); waitErr != nil {
+			return nil, fmt.Errorf("声明式协议结果下载失败：%w", waitErr)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("声明式协议结果下载失败：%w", err)
 	}
@@ -3282,6 +3338,10 @@ func resolveProviderRelativeMediaURL(baseURL, value string) string {
 
 func retryableProtocolMediaDownload(err error) bool {	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	// 聚合网关偶发瞬时 5xx（踩坑笔记第五节），下载结果同样可能撞上，按短退避重试。
+	if retryableUpstreamStatusError(err) {
+		return true
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
@@ -5064,6 +5124,67 @@ func postJSON(ctx context.Context, config providerConfig, path string, body inte
 	req.Header.Set("Content-Type", "application/json")
 	ApplyOutboundHeaders(req, config.Headers)
 	return doJSON(req, target)
+}
+
+// postJSONWithTransientRetry 针对聚合网关偶发瞬时 5xx（GROK 踩坑笔记第五节：
+// "Upstream service temporarily unavailable"）与路径抖动网络错误（连接池闲置回收后
+// 重新拨号撞上坏窗口：Clash 节点切换、GFW RST、路由抖动；POST 不会被 net/http
+// 自动重试）的创建请求重试：短退避 1.5s→3s，最多 3 次尝试；4xx 客户端错误立即
+// 失败，避免浪费上游配额重复同样的拒收。
+func postJSONWithTransientRetry(ctx context.Context, config providerConfig, path string, body interface{}, target interface{}) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		err = postJSON(ctx, config, path, body, target)
+		if err == nil || attempt == 2 || !retryableUpstreamRequestError(err) {
+			break
+		}
+		delay := time.Duration(attempt+1) * 1500 * time.Millisecond
+		var httpErr providerHTTPError
+		if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 && httpErr.RetryAfter <= 10*time.Second {
+			delay = httpErr.RetryAfter
+		}
+		if waitErr := sleepContext(ctx, delay); waitErr != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// retryableUpstreamRequestError 瞬时 5xx 或瞬时网络错误，值得短退避重试。
+func retryableUpstreamRequestError(err error) bool {
+	return retryableUpstreamStatusError(err) || retryableUpstreamNetworkError(err)
+}
+
+// retryableUpstreamNetworkError 判定新连接/在途连接被静默断开的瞬时网络错误。
+// 任务取消与整体超时（DeadlineExceeded）不算瞬时——重试只会重复等死。
+func retryableUpstreamNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary()) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{"tls handshake timeout", "connection reset", "unexpected eof", "broken pipe", "\"eof\"", ": eof"} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func retryableUpstreamStatusError(err error) bool {
+	var httpErr providerHTTPError
+	if !errors.As(err, &httpErr) {
+		return false
+	}
+	switch httpErr.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 524:
+		return true
+	default:
+		return false
+	}
 }
 
 func applyProviderAuth(req *http.Request, config providerConfig) {

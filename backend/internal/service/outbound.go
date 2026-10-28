@@ -394,15 +394,44 @@ func allowPrivateUpstreams() bool {
 
 // allowedPrivateUpstreamHost lets operators pin only explicitly trusted upstream
 // hostnames to an internal route without disabling SSRF protection for every URL.
+// CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS 除精确主机名外还支持通配后缀：
+//   - *.example.com 匹配 example.com 及其所有子域
+//   - .example.com 只匹配子域（不含 apex）
+//
+// 用于本地开发（Clash fake-IP 会把可信公网域名解析进内网段）精确放行可信
+// 云厂商 / CDN 域名，不得用 CANVAS_ALLOW_PRIVATE_UPSTREAMS=true 整体关闭防护替代。
 func allowedPrivateUpstreamHost(host string) bool {
 	host = normalizeOutboundHost(host)
 	if host == "" {
 		return false
 	}
 	for _, configured := range strings.Split(os.Getenv("CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS"), ",") {
-		if normalizeOutboundHost(configured) == host {
+		if matchAllowedPrivateUpstreamHost(host, normalizeOutboundHost(configured)) {
 			return true
 		}
+	}
+	return false
+}
+
+func matchAllowedPrivateUpstreamHost(host, pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	if host == pattern {
+		return true
+	}
+	if strings.HasPrefix(pattern, "*.") {
+		base := strings.TrimPrefix(pattern, "*.")
+		if base == "" || strings.Contains(base, "*") {
+			return false
+		}
+		return host == base || strings.HasSuffix(host, "."+base)
+	}
+	if strings.HasPrefix(pattern, ".") {
+		if pattern == "." || strings.Contains(pattern[1:], "*") {
+			return false
+		}
+		return strings.HasSuffix(host, pattern)
 	}
 	return false
 }

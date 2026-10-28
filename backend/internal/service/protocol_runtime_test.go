@@ -453,3 +453,161 @@ func testPluginPackage(t *testing.T, manifest []byte) []byte {
 	}
 	return buffer.Bytes()
 }
+
+// 网关实测（2026-09-08 xAI 视频）：POST /v1/videos/generations 保持 65s 后返回
+// HTTP 502，但响应体是已完成的生成结果（status done + 视频 URL，上游已计费）。
+// 客户端按状态码丢弃结果会让用户白付一次生成费；盲目重试 create 又会二次计费。
+// 正确行为：把 5xx 错误体按创建响应解析，能拿到任务 ID 或完成态就沿用。
+func TestDeclarativeProtocolCreateRecoversCompletedResultFromUpstream5xx(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-5xx-recovery","version":"1.0.0","name":"Test 5xx Recovery","author":"Test","documentation":"# Test 5xx Recovery",
+		"contributes":{"providers":[{"id":"test-declarative-5xx-recovery","label":"Test 5xx Recovery","capabilities":["video"],"scopes":["canvas"],"create":{"method":"POST","path":"/tasks","body":{"model":{"$ref":"request.model"}}},"poll":{"method":"GET","path":"/videos/{{taskId}}"},"result":{"method":"GET","path":"/videos/{{taskId}}/content"},"response":{"taskId":{"$coalesce":[{"$ref":"response.id"},{"$ref":"taskId"}]},"status":{"$coalesce":[{"$ref":"response.status"},"pending"]}}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-5xx-recovery.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	createCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tasks":
+			createCalls++
+			// 网关异常形态：502 状态码 + 已完成的业务体。
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"id":"recovered-task","status":"completed"}`))
+		case "/v1/videos/recovered-task/content":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-5xx-recovery", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "video", Prompt: "a clip", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want completed body recovered from 502", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("create calls = %d, want 1 (must not resubmit a billed generation)", createCalls)
+	}
+	if result["mode"] != "video" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// 声明式协议媒体结果下载遇到瞬时 5xx 应重试，而不是把整条任务判死。
+func TestDeclarativeProtocolResultDownloadRetriesTransient5xx(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-download-retry","version":"1.0.0","name":"Test Download Retry","author":"Test","documentation":"# Test Download Retry",
+		"contributes":{"providers":[{"id":"test-declarative-download-retry","label":"Test Download Retry","capabilities":["video"],"scopes":["canvas"],"create":{"method":"POST","path":"/tasks","body":{"model":{"$ref":"request.model"}}},"poll":{"method":"GET","path":"/videos/{{taskId}}"},"result":{"method":"GET","path":"/videos/{{taskId}}/content"},"response":{"taskId":{"$coalesce":[{"$ref":"response.id"},{"$ref":"taskId"}]},"status":{"$coalesce":[{"$ref":"response.status"},"pending"]}}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-download-retry.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	downloadCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/tasks":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"dl-task","status":"completed"}`))
+		case "/v1/videos/dl-task/content":
+			downloadCalls++
+			if downloadCalls == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"error":{"message":"Upstream service temporarily unavailable"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-download-retry", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "video", Prompt: "a clip", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want transient 502 download retried", err)
+	}
+	if downloadCalls != 2 {
+		t.Fatalf("download calls = %d, want 2 (initial + retry)", downloadCalls)
+	}
+	if result["mode"] != "video" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// 网关瞬时 502 的错误体（{"error":{...}}）不能被误判为"已完成但无结果"：
+// 同步图片类插件对缺失 status 的 body 默认映射成完成态，恢复守卫必须同时要求
+// 任务 ID 或真实媒体输出；两者都没有则按瞬时错误重试 create（此时未生成未扣费）。
+func TestDeclarativeProtocolCreateRetriesGenuineTransient5xxErrorBody(t *testing.T) {
+	manifest := []byte(`{
+		"apiVersion":"yingce.plugin/v2",
+		"id":"test-declarative-5xx-error-retry","version":"1.0.0","name":"Test 5xx Error Retry","author":"Test","documentation":"# Test 5xx Error Retry",
+		"contributes":{"providers":[{"id":"test-declarative-5xx-error-retry","label":"Test 5xx Error Retry","capabilities":["image"],"scopes":["canvas"],"create":{"method":"POST","path":"/images/generations","body":{"model":{"$ref":"request.model"},"prompt":{"$ref":"request.prompt"}}},"response":{"status":"succeeded","images":{"$map":{"from":{"$ref":"response.data"},"as":"item","in":{"url":{"$ref":"item.url"}}}},"errorPaths":["error.code"],"messagePaths":["error.message"]}}]}
+	}`)
+	center, err := newPluginRuntime(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := center.install(testPluginPackage(t, manifest), "test-declarative-5xx-error-retry.yingce-plugin"); err != nil {
+		t.Fatal(err)
+	}
+
+	createCalls := 0
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/images/generations":
+			createCalls++
+			if createCalls == 1 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadGateway)
+				_, _ = w.Write([]byte(`{"error":{"message":"Upstream service temporarily unavailable","type":"upstream_error"}}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"url":"` + server.URL + `/out.png"}]}`))
+		case "/out.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write([]byte("image"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "key", Model: "test-model", APIFormat: "openai", InterfaceType: "test-declarative-5xx-error-retry", AllowLocalChannel: true}
+	ctx := withProviderOutboundPolicy(context.Background(), config)
+	ctx = withProtocolRegistry(ctx, center.registrySnapshot())
+	result, err := runDeclarativeProtocolTask(ctx, canvasGenerationInput{Mode: "image", Prompt: "a cat", Config: config})
+	if err != nil {
+		t.Fatalf("runDeclarativeProtocolTask() error = %v, want transient error body retried", err)
+	}
+	if createCalls != 2 {
+		t.Fatalf("create calls = %d, want 2 (error body must not be treated as completed)", createCalls)
+	}
+	if result["mode"] != "image" {
+		t.Fatalf("result = %#v", result)
+	}
+}

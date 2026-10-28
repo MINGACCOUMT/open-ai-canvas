@@ -1081,7 +1081,7 @@ func TestRunGrokImageTaskUsesJSONEditContract(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatalf("decode request body: %v", err)
 		}
-		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "url" {
+		if body.Model != "grok-imagine-image-quality" || body.N != 1 || body.ResponseFormat != "b64_json" {
 			t.Fatalf("request body = %#v", body)
 		}
 		// 单图走 image_url 字符串，兼容 OSS 强制下载头；不要用 image:{url,type}。
@@ -1285,6 +1285,68 @@ func TestRunImageTaskUsesXAIImageEndpoint(t *testing.T) {
 	images, _ := result["images"].([]map[string]string)
 	if len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
 		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+// TestRunXAIImageTaskRetriesTransientUpstreamError 锁定聚合网关偶发瞬时 5xx 的行为
+// （GROK 踩坑笔记第五节）：图片创建请求遇到 502/503/504/524 应短退避重试，
+// 而不是让整条任务直接失败。
+func TestRunXAIImageTaskRetriesTransientUpstreamError(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":{"message":"Upstream service temporarily unavailable","type":"upstream_error"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v, want transient 502 retried", err)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (initial + retry)", calls)
+	}
+	images, _ := result["images"].([]map[string]string)
+	if len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+// TestRunXAIImageTaskDoesNotRetryClientError 客户端错误（如 400/422）必须立即失败，
+// 重试只会浪费配额并重复同样的拒收。
+func TestRunXAIImageTaskDoesNotRetryClientError(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request","type":"invalid_request_error"}}`))
+	}))
+	defer server.Close()
+
+	_, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err == nil {
+		t.Fatalf("runImageTask() error = nil, want 400 surfaced")
+	}
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no retry on 4xx)", calls)
 	}
 }
 
@@ -2955,5 +3017,48 @@ func TestRunMiniMaxVideoTaskReturnsFailureReason(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "1026：content violates policy") {
 		t.Fatalf("runVideoTask() error = %v", err)
+	}
+}
+
+// TestRunXAIImageTaskRetriesFreshConnectionNetworkError 锁定路径抖动场景：
+// 新连接直接被断（EOF，无响应体）时创建请求应重试，而不是把整条任务判成
+// 「无法连接」。常见于连接池闲置回收后的重新拨号撞上网络坏窗口。
+func TestRunXAIImageTaskRetriesFreshConnectionNetworkError(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			// 不回任何响应直接掐断连接，模拟上游/中间设备断连（EOF）。
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Fatal("server does not support hijacking")
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8="}]}`))
+	}))
+	defer server.Close()
+
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Mode:   "image",
+		Prompt: "a cat",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "key", Model: "grok-imagine-image", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v, want EOF retried", err)
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (initial + retry)", calls)
+	}
+	images, _ := result["images"].([]map[string]string)
+	if len(images) != 1 {
+		t.Fatalf("images = %#v", result["images"])
 	}
 }
