@@ -2567,11 +2567,13 @@ func protocolRequestFromInput(input canvasGenerationInput) protocol.GenerationRe
 		resolution = normalizeXAIVideoResolution(resolution)
 	}
 	imageQuality := strings.TrimSpace(input.Config.Quality)
-	// xai/grok 图片插件把 request.resolution/quality 原样透传为 resolution，
-	// 而图片枚举只有 1k/2k；未知档位归一为空让模板省略字段，由上游取默认。
+	// xai/grok 图片链路一律不发 resolution/quality：不同渠道的图片端点档位不一致
+	// （实测有的收 1k/2k、superGrok 直连的按视频档位 480p/720p/1080p 校验），
+	// 任何透传值都可能被上游 serde 拒收；留空让模板 $omitEmpty 省略字段、上游取默认。
+	// legacy runXAIImageTask 本就不发这两个字段，多轮实测均成功。
 	if input.Mode == "image" && (input.Config.InterfaceType == string(model.ChannelInterfaceXAIImage) || input.Config.InterfaceType == string(model.ChannelInterfaceGrokImage)) {
-		resolution = normalizeGrokImageResolution(resolution)
-		imageQuality = normalizeGrokImageResolution(imageQuality)
+		resolution = ""
+		imageQuality = ""
 	}
 	request := protocol.GenerationRequest{
 		Capability:    protocol.Capability(input.Mode),
