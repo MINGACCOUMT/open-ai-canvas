@@ -127,7 +127,17 @@ func finishProtocolAdapterResult(ctx context.Context, input canvasGenerationInpu
 	if input.Mode == "video" {
 		data, mimeType, err = runVideoDownload(ctx, taskID, pollPolicy, download)
 	} else {
-		data, mimeType, err = download(ctx)
+		// 结果下载与媒体下载共用瞬时错误重试：聚合网关偶发 5xx 与网络坏窗口（EOF/reset）
+		// 不应判死整条任务。
+		for attempt := 0; attempt < 3; attempt++ {
+			data, mimeType, err = download(ctx)
+			if err == nil || attempt == 2 || !retryableUpstreamRequestError(err) {
+				break
+			}
+			if waitErr := sleepContext(ctx, time.Duration(attempt+1)*time.Second); waitErr != nil {
+				return nil, fmt.Errorf("声明式协议结果下载失败：%w", waitErr)
+			}
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("声明式协议结果下载失败：%w", err)
@@ -205,6 +215,9 @@ func protocolMediaBytesOnce(ctx context.Context, config providerConfig, referenc
 }
 
 func retryableProtocolMediaDownload(err error) bool {
+	if retryableUpstreamRequestError(err) {
+		return true
+	}
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

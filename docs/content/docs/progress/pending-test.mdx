@@ -5,6 +5,14 @@ description: 当前项目已实现功能的手工验证清单与未确认边界
 
 # 待测试
 
+## xAI/grok 链路修复移植（main 架构）
+
+- 已实现：把 v1.0.54 `a6b03587`（源自 v1.0.53 实测踩坑）移植到 main 领域拆分后的新结构。声明式 create 增加瞬时 5xx / 网络错误（EOF/reset/timeout）短退避重试，5xx 包已完成业务体（已扣费）时解析复用、禁止重提交，并保留 main 的流式文本与 `RequestAwareCreateParser` 路径；非视频结果下载补瞬时错误重试，媒体下载重试判定纳入瞬时 5xx；模型目录 GET 幂等重试。`CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS` 支持 `*.example.com` / `.example.com` 通配后缀。`xai-video` 内置适配器 resolution 收敛上游枚举 1k/2k、`image` 补 `type: image_url`、多图改 `reference_image_urls`，插件清单同步 `request_id` 任务 ID 提取与 `video.url` 结果路径。`xai-grok-images` 插件 `response_format` 默认改 `b64_json`（去除 imgen.x.ai 外网下载依赖），保留 main #760 的图片参数定价合同。前端 AVIF 参考图统一转 JPEG 上传，规避聚合渠道静默丢图。两个 `.yingce-plugin` 包已按 build-packages.sh 的文件清单重打包。
+- 已验证：静态核对（适配器与测试期望逐项比对、manifest JSON 解析、包内容与源目录 diff、zip 完整性）。本机无 Go / bun 工具链，`go test ./...` 与 `bun run build` 未运行。
+- [ ] 后端：`cd backend && go test ./internal/app ./internal/protocol ./internal/outbound`，重点 5xx 恢复 / 瞬时重试 / 通配白名单 / xAI resolution 1k/2k 用例。
+- [ ] 联调：xAI 官方渠道发起视频生成，720p/1080p 档位映射为 1k/2k 被上游接受；多图参考走 `reference_image_urls`；轮询用 `request_id` 取到结果。
+- [ ] 联调：grok 图片渠道默认返回 b64_json 内嵌结果，不再访问 imgen.x.ai；AVIF 参考图生成前被转成 JPEG 上传。
+
 ## 推广中心
 
 - 已实现：系统设置 `referral` 控制推广开关、开放方式（全民 / 指定推广人）和返佣比例；`users.is_promoter` 标记推广人，后台用户编辑抽屉可切换，用户列表显示「推广人」标签。`/auth/session` 返回 `referralAvailable` 决定账户菜单是否显示「推广中心」入口。用户接口 `GET /api/referral`、`/api/referral/invitees`、`/api/referral/commissions`；后台接口 `GET/PATCH /api/admin/settings/referral`、`GET /api/admin/referral/commissions`。注册页读取 `?ref=` 并在会话内保留，注册成功后绑定归属。积分充值订单入账后（支付回调、主动查询、对账补发）按订单 ID 幂等发放返佣积分，流水类型 `referral_commission`。

@@ -334,12 +334,63 @@
               ]
             },
             "resolution": {
-              "$coalesce": [
-                {
-                  "$ref": "request.resolution"
-                },
-                "720p"
-              ]
+              "$omitEmpty": {
+                "$switch": {
+                  "cases": [
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.resolution"
+                              }
+                            }
+                          },
+                          [
+                            "1k",
+                            "480",
+                            "480p",
+                            "720",
+                            "720p",
+                            "low",
+                            "standard",
+                            "medium"
+                          ]
+                        ]
+                      },
+                      "then": "1k"
+                    },
+                    {
+                      "when": {
+                        "$in": [
+                          {
+                            "$lower": {
+                              "$trim": {
+                                "$ref": "request.resolution"
+                              }
+                            }
+                          },
+                          [
+                            "2k",
+                            "1080",
+                            "1080p",
+                            "1440",
+                            "1440p",
+                            "2160",
+                            "2160p",
+                            "4k",
+                            "hd",
+                            "high"
+                          ]
+                        ]
+                      },
+                      "then": "2k"
+                    }
+                  ],
+                  "default": null
+                }
+              }
             },
             "image": {
               "$if": {
@@ -452,6 +503,9 @@
                 "$ref": "response.id"
               },
               {
+                "$ref": "response.request_id"
+              },
+              {
                 "$ref": "response.task_id"
               },
               {
@@ -496,6 +550,9 @@
             "$coalesce": [
               {
                 "$ref": "response.video_url"
+              },
+              {
+                "$ref": "response.video.url"
               },
               {
                 "$ref": "response.videoUrl"
