@@ -524,6 +524,11 @@
             "error.code"
           ],
           "resultEphemeral": true
+        },
+        "result": {
+          "method": "GET",
+          "path": "/v1/videos/{{taskId}}/content",
+          "contentType": "application/octet-stream"
         }
       }
     ]
