@@ -504,6 +504,9 @@
                 "$ref": "response.videoUrl"
               },
               {
+                "$ref": "response.video.url"
+              },
+              {
                 "$ref": "response.result_url"
               },
               {

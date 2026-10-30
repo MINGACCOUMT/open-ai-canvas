@@ -185,8 +185,27 @@ func protocolMediaBytesOnce(ctx context.Context, config providerConfig, referenc
 	if value == "" {
 		return nil, "", errors.New("声明式协议媒体结果地址为空")
 	}
+	// 聚合网关可能返回相对路径（如 /v1/videos/{id}/content），必须基于渠道
+	// BaseURL 解析成绝对地址，否则外链下载的 SSRF 校验会报「外部服务地址无效」。
+	if strings.HasPrefix(value, "/") {
+		value = resolveProviderRelativeMediaURL(config.BaseURL, value)
+	}
 	data, mimeType, err := getProviderExternalBinary(withProviderRequestKind(ctx, "download"), config, value)
 	return data, normalizedMediaMimeType(mimeType, data), err
+}
+
+// resolveProviderRelativeMediaURL 把上游返回的相对媒体路径拼到渠道 BaseURL 上；
+// BaseURL 非法或已是绝对地址时原样返回。
+func resolveProviderRelativeMediaURL(baseURL, value string) string {
+	base, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return value
+	}
+	ref, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	return base.ResolveReference(ref).String()
 }
 
 func retryableProtocolMediaDownload(err error) bool {
