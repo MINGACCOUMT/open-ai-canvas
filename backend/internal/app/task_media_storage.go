@@ -122,6 +122,12 @@ func (s *Service) downloadTaskMedia(ctx context.Context, config providerConfig, 
 		}
 		recordProviderRequest(logged, started, statusCode, nil, safeErr)
 	}()
+	// 声明式插件轮询可能返回相对路径（如 /v1/videos/{id}/content），必须基于
+	// 渠道 BaseURL 先归一成绝对地址：否则出站校验直接拒绝，且 sameProviderOrigin
+	// 判定不成立导致渠道鉴权（网关 content 端点要求 Bearer）不会附带。
+	if strings.HasPrefix(url, "/") {
+		url = resolveProviderRelativeMediaURL(config.BaseURL, url)
+	}
 	if _, err = ValidateOutboundURL(url); err != nil {
 		return "", "", err
 	}
